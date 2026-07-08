@@ -1,0 +1,11 @@
+[package]
+name = "rustscript-bevy-gameplay"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy_ecs = "0.18.1"
+vm = { package = "pd-vm", path = "../rustscript/pd-vm", default-features = false, features = ["runtime"] }
+
+[dev-dependencies]
+pretty_assertions = "1"

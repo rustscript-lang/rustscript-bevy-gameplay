@@ -1,0 +1,5 @@
+[build]
+target-dir = "/mnt/TEMP/workspace/rustscript-bevy-gameplay/target"
+
+[env]
+RUST_TEST_THREADS = "4"
