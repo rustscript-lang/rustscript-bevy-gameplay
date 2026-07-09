@@ -6,8 +6,8 @@ license = "Apache-2.0"
 
 [dependencies]
 bevy_ecs = "0.18.1"
-pd-host-function = { path = "../rustscript/pd-vm/pd-host-function" }
-vm = { package = "pd-vm", path = "../rustscript/pd-vm", default-features = false, features = ["runtime"] }
+pd-host-function = { path = "../rustscript/pd-host-function" }
+vm = { package = "pd-vm", path = "../rustscript", default-features = false, features = ["runtime"] }
 
 [dev-dependencies]
 bevy = { version = "0.18.1", default-features = false, features = ["default_app", "bevy_winit", "x11", "bevy_render", "bevy_core_pipeline", "bevy_sprite", "bevy_sprite_render", "bevy_text", "bevy_ui", "bevy_ui_render", "default_font", "png"] }
