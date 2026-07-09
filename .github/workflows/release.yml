@@ -52,6 +52,12 @@ jobs:
           repository: rustscript-lang/rustscript
           path: rustscript
 
+      - name: Checkout pd-edge ABI
+        uses: actions/checkout@v4
+        with:
+          repository: rustscript-lang/pd-edge
+          path: pd-edge
+
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         run: |

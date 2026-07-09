@@ -16,6 +16,7 @@ use rustscript_bevy_gameplay::{
 use script_editor::{DebugSession, EditorAction, LiveScriptEditor, ScriptTab};
 use vm::{DebugCommandBridge, Debugger};
 
+#[path = "common/script_editor.rs"]
 mod script_editor;
 
 const MOVE_SCRIPT: &str = include_str!("../scripts/xiangqi_move.rss");
