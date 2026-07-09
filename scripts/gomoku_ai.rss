@@ -1,0 +1,124 @@
+use bevy;
+
+let size: int = bevy::Gomoku::board_size();
+let opponent: int = if ai_player == 1 => { 2 } else => { 1 };
+let center: int = size / 2;
+let mut best_x: int = -1;
+let mut best_y: int = -1;
+let mut best_score: int = -1;
+
+let mut scan_y: int = 0;
+while scan_y < size {
+    let mut scan_x: int = 0;
+    while scan_x < size {
+        let empty: bool = bevy::Gomoku::cell(scan_x, scan_y) == 0;
+        let considered: bool = if empty => {
+            let diff_x: int = if scan_x > center => {
+                scan_x - center
+            } else => {
+                center - scan_x
+            };
+            let diff_y: int = if scan_y > center => {
+                scan_y - center
+            } else => {
+                center - scan_y
+            };
+            let mut score: int = 30 - diff_x - diff_y;
+
+            let mut dir: int = 0;
+            while dir < 4 {
+                let dx: int = if dir == 0 => {
+                    1
+                } else => {
+                    if dir == 1 => {
+                        0
+                    } else => {
+                        1
+                    }
+                };
+                let dy: int = if dir == 0 => {
+                    0
+                } else => {
+                    if dir == 1 => {
+                        1
+                    } else => {
+                        if dir == 2 => {
+                            1
+                        } else => {
+                            -1
+                        }
+                    }
+                };
+
+                let mut own_total: int = 1;
+                let mut x: int = scan_x + dx;
+                let mut y: int = scan_y + dy;
+                while bevy::Gomoku::cell(x, y) == ai_player {
+                    own_total = own_total + 1;
+                    x = x + dx;
+                    y = y + dy;
+                }
+                x = scan_x - dx;
+                y = scan_y - dy;
+                while bevy::Gomoku::cell(x, y) == ai_player {
+                    own_total = own_total + 1;
+                    x = x - dx;
+                    y = y - dy;
+                }
+
+                let mut enemy_total: int = 1;
+                x = scan_x + dx;
+                y = scan_y + dy;
+                while bevy::Gomoku::cell(x, y) == opponent {
+                    enemy_total = enemy_total + 1;
+                    x = x + dx;
+                    y = y + dy;
+                }
+                x = scan_x - dx;
+                y = scan_y - dy;
+                while bevy::Gomoku::cell(x, y) == opponent {
+                    enemy_total = enemy_total + 1;
+                    x = x - dx;
+                    y = y - dy;
+                }
+
+                let own_bonus: int = if own_total >= 5 => {
+                    100000
+                } else => {
+                    own_total * own_total * 120
+                };
+                let block_bonus: int = if enemy_total >= 5 => {
+                    90000
+                } else => {
+                    enemy_total * enemy_total * 95
+                };
+                score = score + own_bonus + block_bonus;
+                dir = dir + 1;
+            }
+
+            let selected: bool = if score > best_score => {
+                best_score = score;
+                best_x = scan_x;
+                best_y = scan_y;
+                true
+            } else => {
+                false
+            };
+            true
+        } else => {
+            false
+        };
+        scan_x = scan_x + 1;
+    }
+    scan_y = scan_y + 1;
+}
+
+let fallback: bool = if best_x < 0 => {
+    best_x = center;
+    best_y = center;
+    true
+} else => {
+    false
+};
+let published: bool = bevy::Gomoku::set_ai_move(best_x, best_y);
+best_x;

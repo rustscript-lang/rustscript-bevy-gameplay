@@ -54,3 +54,33 @@ fn shooter_example_script_smoke_runs_end_to_end() {
         "unexpected shooter example stdout:\n{stdout}"
     );
 }
+
+#[test]
+fn gomoku_example_script_smoke_runs_end_to_end() {
+    let output = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()))
+        .args([
+            "run",
+            "--quiet",
+            "--example",
+            "gomoku",
+            "--",
+            "--script-smoke",
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("gomoku example smoke should launch");
+
+    assert!(
+        output.status.success(),
+        "gomoku smoke failed\nstatus: {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("gomoku_turns=") && stdout.contains("stones="),
+        "unexpected gomoku example stdout:\n{stdout}"
+    );
+}

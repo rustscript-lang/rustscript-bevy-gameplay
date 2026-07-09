@@ -120,6 +120,77 @@ pub struct ShooterRuleTickSummary {
     pub rewards_spawned: usize,
 }
 
+pub const GOMOKU_BOARD_SIZE: i64 = 15;
+
+#[derive(Resource, Debug, Clone, PartialEq, Eq)]
+pub struct GomokuBoard {
+    cells: Vec<i64>,
+}
+
+impl Default for GomokuBoard {
+    fn default() -> Self {
+        Self {
+            cells: vec![0; (GOMOKU_BOARD_SIZE * GOMOKU_BOARD_SIZE) as usize],
+        }
+    }
+}
+
+impl GomokuBoard {
+    pub fn cell(&self, x: i64, y: i64) -> i64 {
+        self.index(x, y)
+            .and_then(|index| self.cells.get(index).copied())
+            .unwrap_or(3)
+    }
+
+    pub fn cells(&self) -> &[i64] {
+        &self.cells
+    }
+
+    pub fn clear(&mut self) {
+        self.cells.fill(0);
+    }
+
+    pub fn set_for_test(&mut self, x: i64, y: i64, stone: i64) {
+        self.set_raw(x, y, stone);
+    }
+
+    fn set_raw(&mut self, x: i64, y: i64, stone: i64) -> bool {
+        let Some(index) = self.index(x, y) else {
+            return false;
+        };
+        self.cells[index] = stone;
+        true
+    }
+
+    fn index(&self, x: i64, y: i64) -> Option<usize> {
+        if !(0..GOMOKU_BOARD_SIZE).contains(&x) || !(0..GOMOKU_BOARD_SIZE).contains(&y) {
+            return None;
+        }
+        Some((y * GOMOKU_BOARD_SIZE + x) as usize)
+    }
+}
+
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct GomokuScriptState {
+    legal: bool,
+    winner: i64,
+    draw: bool,
+    ai_move: Option<(i64, i64)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GomokuMoveSummary {
+    pub legal: bool,
+    pub winner: i64,
+    pub draw: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GomokuAiMove {
+    pub x: i64,
+    pub y: i64,
+}
+
 #[derive(Resource, Debug, Clone)]
 pub struct DamageRules {
     source: String,
@@ -155,6 +226,56 @@ pub fn apply_shooter_script(world: &mut World, source: &str) -> Result<ShooterSu
     world.insert_resource(ShooterSpawnRules::default());
     let (_, jit) = with_shooter_context(world, || run_shooter_script(source))?;
     summarize_shooter_world(world, jit)
+}
+
+pub fn reset_gomoku_board(world: &mut World) {
+    if let Some(mut board) = world.get_resource_mut::<GomokuBoard>() {
+        board.clear();
+    } else {
+        world.insert_resource(GomokuBoard::default());
+    }
+    world.insert_resource(GomokuScriptState::default());
+}
+
+pub fn apply_gomoku_move_script(
+    world: &mut World,
+    source: &str,
+    x: i64,
+    y: i64,
+    player: i64,
+) -> Result<GomokuMoveSummary, String> {
+    ensure_gomoku_resources(world);
+    world.insert_resource(GomokuScriptState::default());
+    let wrapped = format!(
+        "let move_x: int = {x};\nlet move_y: int = {y};\nlet player: int = {player};\n{source}"
+    );
+    let _value = with_gomoku_context(world, || run_gomoku_script(&wrapped))?;
+    let state = *world
+        .get_resource::<GomokuScriptState>()
+        .ok_or_else(|| "gomoku script did not publish a result".to_string())?;
+    Ok(GomokuMoveSummary {
+        legal: state.legal,
+        winner: state.winner,
+        draw: state.draw,
+    })
+}
+
+pub fn choose_gomoku_ai_move(
+    world: &mut World,
+    source: &str,
+    ai_player: i64,
+) -> Result<GomokuAiMove, String> {
+    ensure_gomoku_resources(world);
+    world.insert_resource(GomokuScriptState::default());
+    let wrapped = format!("let ai_player: int = {ai_player};\n{source}");
+    let _value = with_gomoku_context(world, || run_gomoku_script(&wrapped))?;
+    let state = *world
+        .get_resource::<GomokuScriptState>()
+        .ok_or_else(|| "gomoku script did not publish an AI move".to_string())?;
+    let (x, y) = state
+        .ai_move
+        .ok_or_else(|| "gomoku AI script did not select a move".to_string())?;
+    Ok(GomokuAiMove { x, y })
 }
 
 pub fn tick_shooter_spawn_rules(
@@ -305,6 +426,15 @@ fn ensure_player(world: &mut World) -> Entity {
         .id()
 }
 
+fn ensure_gomoku_resources(world: &mut World) {
+    if !world.contains_resource::<GomokuBoard>() {
+        world.insert_resource(GomokuBoard::default());
+    }
+    if !world.contains_resource::<GomokuScriptState>() {
+        world.insert_resource(GomokuScriptState::default());
+    }
+}
+
 fn spawn_enemy_entity(
     world: &mut World,
     kind: &str,
@@ -387,9 +517,15 @@ struct ShooterContext {
     world: *mut World,
 }
 
+#[derive(Clone, Copy)]
+struct GomokuContext {
+    world: *mut World,
+}
+
 thread_local! {
     static BEVY_CONTEXT: RefCell<Option<BevyContext>> = const { RefCell::new(None) };
     static SHOOTER_CONTEXT: RefCell<Option<ShooterContext>> = const { RefCell::new(None) };
+    static GOMOKU_CONTEXT: RefCell<Option<GomokuContext>> = const { RefCell::new(None) };
 }
 
 struct BevyContextGuard;
@@ -407,6 +543,16 @@ struct ShooterContextGuard;
 impl Drop for ShooterContextGuard {
     fn drop(&mut self) {
         SHOOTER_CONTEXT.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
+}
+
+struct GomokuContextGuard;
+
+impl Drop for GomokuContextGuard {
+    fn drop(&mut self) {
+        GOMOKU_CONTEXT.with(|slot| {
             *slot.borrow_mut() = None;
         });
     }
@@ -435,6 +581,17 @@ fn with_shooter_context<T>(
     f()
 }
 
+fn with_gomoku_context<T>(
+    world: &mut World,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    GOMOKU_CONTEXT.with(|slot| {
+        *slot.borrow_mut() = Some(GomokuContext { world });
+    });
+    let _guard = GomokuContextGuard;
+    f()
+}
+
 fn with_world<T>(f: impl FnOnce(&mut World, Entity) -> VmResult<T>) -> VmResult<T> {
     BEVY_CONTEXT.with(|slot| {
         let ctx = slot
@@ -455,10 +612,34 @@ fn with_shooter_world<T>(f: impl FnOnce(&mut World) -> VmResult<T>) -> VmResult<
     })
 }
 
+fn with_gomoku_world<T>(f: impl FnOnce(&mut World) -> VmResult<T>) -> VmResult<T> {
+    GOMOKU_CONTEXT.with(|slot| {
+        let ctx = slot
+            .borrow()
+            .ok_or_else(|| VmError::HostError("missing Bevy gomoku context".to_string()))?;
+        // SAFETY: the pointer is installed only for one synchronous RustScript evaluation.
+        unsafe { f(&mut *ctx.world) }
+    })
+}
+
 fn run_value(source: &str) -> Result<Value, String> {
     let compiled = compile_source(source).map_err(|err| err.to_string())?;
     let mut vm = Vm::new(compiled.program);
     bind_bevy_hosts(&mut vm);
+    let status = vm.run().map_err(|err| err.to_string())?;
+    if status != VmStatus::Halted {
+        return Err(format!("script did not halt: {status:?}"));
+    }
+    vm.stack()
+        .last()
+        .cloned()
+        .ok_or_else(|| "script returned an empty stack".to_string())
+}
+
+fn run_gomoku_script(source: &str) -> Result<Value, String> {
+    let compiled = compile_source(source).map_err(|err| err.to_string())?;
+    let mut vm = Vm::new_with_jit_config(compiled.program, shooter_jit_config());
+    bind_gomoku_hosts(&mut vm);
     let status = vm.run().map_err(|err| err.to_string())?;
     if status != VmStatus::Halted {
         return Err(format!("script did not halt: {status:?}"));
@@ -545,6 +726,23 @@ fn bind_shooter_hosts(vm: &mut Vm) {
     );
 }
 
+fn bind_gomoku_hosts(vm: &mut Vm) {
+    vm.bind_static_args_function(
+        "bevy::Gomoku::board_size",
+        host::bevy::gomoku_board_size_host,
+    );
+    vm.bind_static_args_function("bevy::Gomoku::cell", host::bevy::gomoku_cell_host);
+    vm.bind_static_args_function("bevy::Gomoku::set_cell", host::bevy::gomoku_set_cell_host);
+    vm.bind_static_args_function(
+        "bevy::Gomoku::set_move_result",
+        host::bevy::gomoku_set_move_result_host,
+    );
+    vm.bind_static_args_function(
+        "bevy::Gomoku::set_ai_move",
+        host::bevy::gomoku_set_ai_move_host,
+    );
+}
+
 mod host {
     use super::*;
     use pd_host_function::pd_host_function;
@@ -568,6 +766,15 @@ mod host {
             match value {
                 Value::Int(value) => Ok(*value),
                 _ => Err(VmError::TypeMismatch("int")),
+            }
+        }
+    }
+
+    impl BorrowVmValue<'_> for bool {
+        fn borrow_vm_value(value: &Value, _label: &str) -> VmResult<Self> {
+            match value {
+                Value::Bool(value) => Ok(*value),
+                _ => Err(VmError::TypeMismatch("bool")),
             }
         }
     }
@@ -867,6 +1074,80 @@ mod host {
             args: &[Value],
         ) -> VmResult<CallOutcome> {
             return_one(shooter_spawn_enemy_after_kills(args))
+        }
+
+        /// Returns the square Gomoku board size for RustScript scans.
+        #[pd_host_function(name = "bevy::Gomoku::board_size")]
+        pub(crate) fn gomoku_board_size_impl() -> VmResult<i64> {
+            with_gomoku_world(|_world| Ok(GOMOKU_BOARD_SIZE))
+        }
+
+        pub(crate) fn gomoku_board_size_host(args: &[Value]) -> VmResult<CallOutcome> {
+            return_one(gomoku_board_size(args))
+        }
+
+        /// Reads a board cell; out-of-bounds cells return a sentinel value.
+        #[pd_host_function(name = "bevy::Gomoku::cell")]
+        pub(crate) fn gomoku_cell_impl(x: i64, y: i64) -> VmResult<i64> {
+            with_gomoku_world(|world| {
+                ensure_gomoku_resources(world);
+                let board = world.resource::<GomokuBoard>();
+                Ok(board.cell(x, y))
+            })
+        }
+
+        pub(crate) fn gomoku_cell_host(args: &[Value]) -> VmResult<CallOutcome> {
+            return_one(gomoku_cell(args))
+        }
+
+        /// Writes a board cell after RustScript has accepted a move.
+        #[pd_host_function(name = "bevy::Gomoku::set_cell")]
+        pub(crate) fn gomoku_set_cell_impl(x: i64, y: i64, stone: i64) -> VmResult<bool> {
+            with_gomoku_world(|world| {
+                ensure_gomoku_resources(world);
+                let mut board = world.resource_mut::<GomokuBoard>();
+                Ok(board.set_raw(x, y, stone))
+            })
+        }
+
+        pub(crate) fn gomoku_set_cell_host(args: &[Value]) -> VmResult<CallOutcome> {
+            return_one(gomoku_set_cell(args))
+        }
+
+        /// Publishes RustScript move legality and board outcome.
+        #[pd_host_function(name = "bevy::Gomoku::set_move_result")]
+        pub(crate) fn gomoku_set_move_result_impl(
+            legal: bool,
+            winner: i64,
+            draw: bool,
+        ) -> VmResult<bool> {
+            with_gomoku_world(|world| {
+                ensure_gomoku_resources(world);
+                let mut state = world.resource_mut::<GomokuScriptState>();
+                state.legal = legal;
+                state.winner = winner;
+                state.draw = draw;
+                Ok(true)
+            })
+        }
+
+        pub(crate) fn gomoku_set_move_result_host(args: &[Value]) -> VmResult<CallOutcome> {
+            return_one(gomoku_set_move_result(args))
+        }
+
+        /// Publishes the RustScript-selected AI move.
+        #[pd_host_function(name = "bevy::Gomoku::set_ai_move")]
+        pub(crate) fn gomoku_set_ai_move_impl(x: i64, y: i64) -> VmResult<bool> {
+            with_gomoku_world(|world| {
+                ensure_gomoku_resources(world);
+                let mut state = world.resource_mut::<GomokuScriptState>();
+                state.ai_move = Some((x, y));
+                Ok(true)
+            })
+        }
+
+        pub(crate) fn gomoku_set_ai_move_host(args: &[Value]) -> VmResult<CallOutcome> {
+            return_one(gomoku_set_ai_move(args))
         }
     }
 }
