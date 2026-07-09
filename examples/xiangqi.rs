@@ -9,13 +9,15 @@ use bevy_egui::{
     PrimaryEguiContext, egui,
 };
 use rustscript_bevy_gameplay::{
-    XiangqiAiMove, XiangqiBoard, XiangqiMoveSummary, apply_xiangqi_move_script,
-    choose_xiangqi_ai_move, debug_xiangqi_ai_script, debug_xiangqi_move_script,
-    reset_xiangqi_board,
+    XIANGQI_BOARD_HEIGHT, XIANGQI_BOARD_WIDTH, XiangqiAiMove, XiangqiBoard, XiangqiMoveSummary,
+    apply_xiangqi_move_script, choose_xiangqi_ai_move, debug_xiangqi_ai_script,
+    debug_xiangqi_move_script, reset_xiangqi_board,
 };
 use script_editor::{DebugSession, EditorAction, LiveScriptEditor, ScriptTab};
 use vm::{DebugCommandBridge, Debugger};
 
+#[path = "common/board_save.rs"]
+mod board_save;
 #[path = "common/script_editor.rs"]
 mod script_editor;
 
@@ -25,6 +27,7 @@ const RED: i64 = 1;
 const BLACK: i64 = -1;
 const MOVE_TAB: usize = 0;
 const AI_TAB: usize = 1;
+const SCRIPT_TITLES: &[&str] = &["move.rss", "ai.rss"];
 const XIANGQI_MOVE_PREFIX: &str = "let from_x: int = 4;\nlet from_y: int = 6;\nlet to_x: int = 4;\nlet to_y: int = 5;\nlet player: int = 1;\n";
 const XIANGQI_AI_PREFIX: &str = "let ai_player: int = -1;\n";
 const XIANGQI_HOST_APIS: &[&str] = &[
@@ -44,6 +47,8 @@ struct XiangqiUiState {
     jit_trace_count: usize,
     last_ai_move_micros: Option<u128>,
     fonts_ready: bool,
+    board_io_text: String,
+    board_io_status: String,
 }
 
 impl Default for XiangqiUiState {
@@ -57,6 +62,8 @@ impl Default for XiangqiUiState {
             jit_trace_count: 0,
             last_ai_move_micros: None,
             fonts_ready: false,
+            board_io_text: String::new(),
+            board_io_status: String::new(),
         }
     }
 }
@@ -193,7 +200,7 @@ fn run_script_smoke() {
 
 fn xiangqi_ui(world: &mut World) {
     let board = world.resource::<XiangqiBoard>().clone();
-    let state = world.resource::<XiangqiUiState>().clone();
+    let mut state = world.resource::<XiangqiUiState>().clone();
     let mut scripts = world
         .remove_resource::<XiangqiScripts>()
         .unwrap_or_default();
@@ -203,6 +210,7 @@ fn xiangqi_ui(world: &mut World) {
     }
     let mut clicked = None;
     let mut restart = false;
+    let mut pending_import = None;
     let mut installed_fonts = false;
     let mut editor_actions = Vec::new();
 
@@ -236,6 +244,35 @@ fn xiangqi_ui(world: &mut World) {
                         if ui.button("Restart").clicked() {
                             restart = true;
                         }
+                        egui::CollapsingHeader::new("Save / Load")
+                            .id_salt("xiangqi_save_load")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    if ui.button("Export").clicked() {
+                                        state.board_io_text =
+                                            export_xiangqi_save(&board, &scripts.editor);
+                                        state.board_io_status =
+                                            "Exported board and scripts".to_string();
+                                    }
+                                    if ui.button("Import").clicked() {
+                                        pending_import = Some(state.board_io_text.clone());
+                                    }
+                                });
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut state.board_io_text)
+                                        .font(egui::TextStyle::Monospace)
+                                        .desired_width(ui.available_width().min(620.0))
+                                        .desired_rows(4),
+                                );
+                                if !state.board_io_status.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(&state.board_io_status)
+                                            .size(12.0)
+                                            .color(egui::Color32::from_rgb(176, 185, 188)),
+                                    );
+                                }
+                            });
                         ui.add_space(10.0);
 
                         let available_width = ui.available_width();
@@ -267,9 +304,25 @@ fn xiangqi_ui(world: &mut World) {
     system_state.apply(world);
 
     if installed_fonts {
-        world.resource_mut::<XiangqiUiState>().fonts_ready = true;
+        state.fonts_ready = true;
     }
     handle_xiangqi_editor_actions(world, &mut scripts, editor_actions);
+
+    if let Some(text) = pending_import {
+        clicked = None;
+        match import_xiangqi_save(world, &mut scripts, &text) {
+            Ok(()) => {
+                state.message = "Imported board and scripts".to_string();
+                state.selected = None;
+                state.winner = 0;
+                state.last_ai_move = None;
+                state.board_io_status = "Imported board and scripts".to_string();
+            }
+            Err(err) => {
+                state.board_io_status = format!("Import error: {err}");
+            }
+        }
+    }
 
     if restart {
         reset_xiangqi_board(world);
@@ -278,6 +331,7 @@ fn xiangqi_ui(world: &mut World) {
         return;
     }
 
+    world.insert_resource(state);
     world.insert_resource(scripts);
     if let Some((x, y)) = clicked {
         handle_click(world, x, y);
@@ -464,6 +518,41 @@ fn pointer_to_cell(
     } else {
         None
     }
+}
+
+fn export_xiangqi_save(board: &XiangqiBoard, editor: &LiveScriptEditor) -> String {
+    board_save::encode_board_save(
+        "xiangqi",
+        board.cells(),
+        &[
+            ("move.rss", editor.active_source(MOVE_TAB)),
+            ("ai.rss", editor.active_source(AI_TAB)),
+        ],
+    )
+}
+
+fn import_xiangqi_save(
+    world: &mut World,
+    scripts: &mut XiangqiScripts,
+    text: &str,
+) -> Result<(), String> {
+    let package = board_save::decode_board_save(
+        text,
+        "xiangqi",
+        (XIANGQI_BOARD_WIDTH * XIANGQI_BOARD_HEIGHT) as usize,
+        SCRIPT_TITLES,
+    )?;
+    let mut board = XiangqiBoard::default();
+    board.replace_cells(package.cells)?;
+    for script in package.scripts {
+        match script.title.as_str() {
+            "move.rss" => scripts.editor.set_source(MOVE_TAB, script.source)?,
+            "ai.rss" => scripts.editor.set_source(AI_TAB, script.source)?,
+            _ => {}
+        }
+    }
+    world.insert_resource(board);
+    Ok(())
 }
 
 fn handle_click(world: &mut World, x: i64, y: i64) {
@@ -778,5 +867,33 @@ mod tests {
         assert!(candidates.contains(&"Noto Sans CJK SC"));
         assert!(candidates.contains(&"WenQuanYi Micro Hei"));
         assert!(candidates.iter().all(|name| !name.contains('\\')));
+    }
+
+    #[test]
+    fn xiangqi_save_roundtrips_board_and_scripts() {
+        let mut world = World::new();
+        let mut board = XiangqiBoard::default();
+        board.clear_for_test();
+        board.set_for_test(4, 9, RED);
+        world.insert_resource(board.clone());
+        let mut scripts = XiangqiScripts::default();
+        let move_source = format!("{MOVE_SCRIPT}\nlet save_marker: int = 1;\n");
+        let ai_source = format!("{AI_SCRIPT}\nlet save_marker: int = 2;\n");
+        scripts
+            .editor
+            .set_source(MOVE_TAB, move_source.clone())
+            .unwrap();
+        scripts
+            .editor
+            .set_source(AI_TAB, ai_source.clone())
+            .unwrap();
+
+        let text = export_xiangqi_save(&board, &scripts.editor);
+        let mut loaded_scripts = XiangqiScripts::default();
+        import_xiangqi_save(&mut world, &mut loaded_scripts, &text).unwrap();
+
+        assert_eq!(world.resource::<XiangqiBoard>().cell(4, 9), RED);
+        assert_eq!(loaded_scripts.editor.active_source(MOVE_TAB), move_source);
+        assert_eq!(loaded_scripts.editor.active_source(AI_TAB), ai_source);
     }
 }

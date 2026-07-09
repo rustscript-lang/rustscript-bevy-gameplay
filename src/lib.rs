@@ -153,6 +153,18 @@ impl GomokuBoard {
         self.cells.fill(0);
     }
 
+    pub fn replace_cells(&mut self, cells: Vec<i64>) -> Result<(), String> {
+        let expected = self.cells.len();
+        if cells.len() != expected {
+            return Err(format!(
+                "board has {} cells; expected {expected}",
+                cells.len()
+            ));
+        }
+        self.cells = cells;
+        Ok(())
+    }
+
     pub fn set_for_test(&mut self, x: i64, y: i64, stone: i64) {
         self.set_raw(x, y, stone);
     }
@@ -234,6 +246,18 @@ impl XiangqiBoard {
 
     pub fn clear_for_test(&mut self) {
         self.cells.fill(0);
+    }
+
+    pub fn replace_cells(&mut self, cells: Vec<i64>) -> Result<(), String> {
+        let expected = self.cells.len();
+        if cells.len() != expected {
+            return Err(format!(
+                "board has {} cells; expected {expected}",
+                cells.len()
+            ));
+        }
+        self.cells = cells;
+        Ok(())
     }
 
     pub fn set_for_test(&mut self, x: i64, y: i64, piece: i64) {

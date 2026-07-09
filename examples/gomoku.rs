@@ -15,6 +15,8 @@ use rustscript_bevy_gameplay::{
 use script_editor::{DebugSession, EditorAction, LiveScriptEditor, ScriptTab};
 use vm::{DebugCommandBridge, Debugger};
 
+#[path = "common/board_save.rs"]
+mod board_save;
 #[path = "common/script_editor.rs"]
 mod script_editor;
 
@@ -24,6 +26,7 @@ const HUMAN: i64 = 1;
 const COMPUTER: i64 = 2;
 const MOVE_TAB: usize = 0;
 const AI_TAB: usize = 1;
+const SCRIPT_TITLES: &[&str] = &["move.rss", "ai.rss"];
 const GOMOKU_MOVE_PREFIX: &str =
     "let move_x: int = 0;\nlet move_y: int = 0;\nlet player: int = 1;\n";
 const GOMOKU_AI_PREFIX: &str = "let ai_player: int = 2;\n";
@@ -43,6 +46,8 @@ struct GomokuUiState {
     jit_enabled: bool,
     jit_trace_count: usize,
     last_ai_move_micros: Option<u128>,
+    board_io_text: String,
+    board_io_status: String,
 }
 
 impl Default for GomokuUiState {
@@ -55,6 +60,8 @@ impl Default for GomokuUiState {
             jit_enabled: true,
             jit_trace_count: 0,
             last_ai_move_micros: None,
+            board_io_text: String::new(),
+            board_io_status: String::new(),
         }
     }
 }
@@ -185,7 +192,7 @@ fn run_script_smoke() {
 
 fn gomoku_ui(world: &mut World) {
     let board = world.resource::<GomokuBoard>().clone();
-    let state = world.resource::<GomokuUiState>().clone();
+    let mut state = world.resource::<GomokuUiState>().clone();
     let mut scripts = world.remove_resource::<GomokuScripts>().unwrap_or_default();
     scripts.editor.update_auto_apply(std::time::Instant::now());
     if let Some(session) = scripts.debug_session.as_ref() {
@@ -193,6 +200,7 @@ fn gomoku_ui(world: &mut World) {
     }
     let mut clicked_move = None;
     let mut restart = false;
+    let mut pending_import = None;
     let mut editor_actions = Vec::new();
 
     let mut system_state = bevy::ecs::system::SystemState::<EguiContexts>::new(world);
@@ -222,6 +230,35 @@ fn gomoku_ui(world: &mut World) {
                         if ui.button("Restart").clicked() {
                             restart = true;
                         }
+                        egui::CollapsingHeader::new("Save / Load")
+                            .id_salt("gomoku_save_load")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    if ui.button("Export").clicked() {
+                                        state.board_io_text =
+                                            export_gomoku_save(&board, &scripts.editor);
+                                        state.board_io_status =
+                                            "Exported board and scripts".to_string();
+                                    }
+                                    if ui.button("Import").clicked() {
+                                        pending_import = Some(state.board_io_text.clone());
+                                    }
+                                });
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut state.board_io_text)
+                                        .font(egui::TextStyle::Monospace)
+                                        .desired_width(ui.available_width().min(620.0))
+                                        .desired_rows(4),
+                                );
+                                if !state.board_io_status.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(&state.board_io_status)
+                                            .size(12.0)
+                                            .color(egui::Color32::from_rgb(174, 184, 188)),
+                                    );
+                                }
+                            });
                         ui.add_space(10.0);
 
                         let available_width = ui.available_width();
@@ -253,6 +290,22 @@ fn gomoku_ui(world: &mut World) {
     system_state.apply(world);
     handle_gomoku_editor_actions(world, &mut scripts, editor_actions);
 
+    if let Some(text) = pending_import {
+        clicked_move = None;
+        match import_gomoku_save(world, &mut scripts, &text) {
+            Ok(()) => {
+                state.message = "Imported board and scripts".to_string();
+                state.winner = 0;
+                state.draw = false;
+                state.last_ai_move = None;
+                state.board_io_status = "Imported board and scripts".to_string();
+            }
+            Err(err) => {
+                state.board_io_status = format!("Import error: {err}");
+            }
+        }
+    }
+
     if restart {
         reset_gomoku_board(world);
         world.insert_resource(GomokuUiState::default());
@@ -260,6 +313,7 @@ fn gomoku_ui(world: &mut World) {
         return;
     }
 
+    world.insert_resource(state);
     world.insert_resource(scripts);
     if let Some((x, y)) = clicked_move {
         play_human_turn(world, x, y);
@@ -362,6 +416,41 @@ fn pointer_to_cell(rect: egui::Rect, step: f32, position: egui::Pos2) -> Option<
     } else {
         None
     }
+}
+
+fn export_gomoku_save(board: &GomokuBoard, editor: &LiveScriptEditor) -> String {
+    board_save::encode_board_save(
+        "gomoku",
+        board.cells(),
+        &[
+            ("move.rss", editor.active_source(MOVE_TAB)),
+            ("ai.rss", editor.active_source(AI_TAB)),
+        ],
+    )
+}
+
+fn import_gomoku_save(
+    world: &mut World,
+    scripts: &mut GomokuScripts,
+    text: &str,
+) -> Result<(), String> {
+    let package = board_save::decode_board_save(
+        text,
+        "gomoku",
+        (GOMOKU_BOARD_SIZE * GOMOKU_BOARD_SIZE) as usize,
+        SCRIPT_TITLES,
+    )?;
+    let mut board = GomokuBoard::default();
+    board.replace_cells(package.cells)?;
+    for script in package.scripts {
+        match script.title.as_str() {
+            "move.rss" => scripts.editor.set_source(MOVE_TAB, script.source)?,
+            "ai.rss" => scripts.editor.set_source(AI_TAB, script.source)?,
+            _ => {}
+        }
+    }
+    world.insert_resource(board);
+    Ok(())
 }
 
 fn play_human_turn(world: &mut World, x: i64, y: i64) {
@@ -580,5 +669,32 @@ mod tests {
         let right = available_width - board_width - left;
 
         assert!((left - right).abs() < 0.01);
+    }
+
+    #[test]
+    fn gomoku_save_roundtrips_board_and_scripts() {
+        let mut world = World::new();
+        let mut board = GomokuBoard::default();
+        board.set_for_test(7, 7, HUMAN);
+        world.insert_resource(board.clone());
+        let mut scripts = GomokuScripts::default();
+        let move_source = format!("{MOVE_SCRIPT}\nlet save_marker: int = 1;\n");
+        let ai_source = format!("{AI_SCRIPT}\nlet save_marker: int = 2;\n");
+        scripts
+            .editor
+            .set_source(MOVE_TAB, move_source.clone())
+            .unwrap();
+        scripts
+            .editor
+            .set_source(AI_TAB, ai_source.clone())
+            .unwrap();
+
+        let text = export_gomoku_save(&board, &scripts.editor);
+        let mut loaded_scripts = GomokuScripts::default();
+        import_gomoku_save(&mut world, &mut loaded_scripts, &text).unwrap();
+
+        assert_eq!(world.resource::<GomokuBoard>().cell(7, 7), HUMAN);
+        assert_eq!(loaded_scripts.editor.active_source(MOVE_TAB), move_source);
+        assert_eq!(loaded_scripts.editor.active_source(AI_TAB), ai_source);
     }
 }

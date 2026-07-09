@@ -9,6 +9,7 @@ use vm::{DebugCommandBridge, DebugCommandBridgeError, SourceError, SourceMap, co
 #[derive(Debug, Clone)]
 pub struct ScriptTab {
     pub title: &'static str,
+    pub default_source: &'static str,
     pub buffer: String,
     pub active_source: String,
     pub lint_prefix: &'static str,
@@ -28,6 +29,7 @@ impl ScriptTab {
     ) -> Self {
         Self {
             title,
+            default_source: source,
             buffer: source.to_string(),
             active_source: source.to_string(),
             lint_prefix,
@@ -140,6 +142,34 @@ impl LiveScriptEditor {
         }
     }
 
+    pub fn set_source(&mut self, index: usize, source: impl Into<String>) -> Result<(), String> {
+        let tab = self
+            .tabs
+            .get_mut(index)
+            .ok_or_else(|| format!("script tab {index} does not exist"))?;
+        tab.buffer = source.into();
+        lint_tab(tab);
+        tab.edited_at = None;
+        tab.applied_at = Some(Instant::now());
+        if tab.diagnostics.is_empty() {
+            tab.active_source = tab.buffer.clone();
+            tab.status = "Applied".to_string();
+            Ok(())
+        } else {
+            tab.status = "Lint error".to_string();
+            Err(format!("{} has lint errors", tab.title))
+        }
+    }
+
+    pub fn reset_tab_to_default(&mut self, index: usize) -> Result<(), String> {
+        let source = self
+            .tabs
+            .get(index)
+            .ok_or_else(|| format!("script tab {index} does not exist"))?
+            .default_source;
+        self.set_source(index, source)
+    }
+
     pub fn update_auto_apply(&mut self, now: Instant) -> Vec<usize> {
         let mut applied = Vec::new();
         for (index, tab) in self.tabs.iter_mut().enumerate() {
@@ -173,6 +203,12 @@ impl LiveScriptEditor {
 
         let active = self.active.min(self.tabs.len().saturating_sub(1));
         ui.horizontal_wrapped(|ui| {
+            if ui.button("Reset").clicked() {
+                let _ = self.reset_tab_to_default(active);
+                self.debug_output.clear();
+                self.debug_line = None;
+                self.debug_attached = false;
+            }
             if ui.button("Debug").clicked() {
                 actions.push(EditorAction::StartDebug(active));
             }
@@ -788,5 +824,22 @@ mod tests {
 
         assert_eq!(diagnostics[0].line, 1);
         assert!(diagnostics[0].start_byte < "let value: int = ;".len());
+    }
+
+    #[test]
+    fn reset_active_tab_restores_default_source() {
+        let mut editor = LiveScriptEditor::new(vec![ScriptTab::new(
+            "move.rss",
+            "let ok: int = 1;",
+            "let move_x: int = 0;\n",
+            HOSTS,
+        )]);
+        editor.set_source(0, "let changed: int = 2;").unwrap();
+
+        editor.reset_tab_to_default(0).unwrap();
+
+        assert_eq!(editor.tabs[0].buffer, "let ok: int = 1;");
+        assert_eq!(editor.tabs[0].active_source, "let ok: int = 1;");
+        assert_eq!(editor.tabs[0].status, "Applied");
     }
 }
