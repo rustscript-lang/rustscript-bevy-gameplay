@@ -1,4 +1,4 @@
-use bevy::prelude::*;
+use bevy::{camera::Viewport, prelude::*, window::PrimaryWindow};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use rustscript_bevy_gameplay::{
     AttackCooldownMs, AttackPower, AttackStyle, Enemy, Health, Player, Position,
@@ -10,6 +10,7 @@ const LEFT: f32 = -430.0;
 const RIGHT: f32 = 520.0;
 const TOP: f32 = 260.0;
 const BOTTOM: f32 = -260.0;
+const SCRIPT_PANEL_WIDTH: f32 = 430.0;
 
 fn main() {
     if std::env::args().any(|arg| arg == "--script-smoke") {
@@ -84,6 +85,9 @@ struct PlayerShip;
 struct EnemyShip;
 
 #[derive(Component)]
+struct GameCamera;
+
+#[derive(Component)]
 struct PlayerBullet {
     damage: i64,
 }
@@ -108,7 +112,7 @@ type ScriptManagedEnemyPositionQuery<'w, 's> =
     Query<'w, 's, (Entity, &'static Position), (With<Enemy>, With<ScriptManagedEnemy>)>;
 
 fn setup(mut commands: Commands) {
-    commands.spawn(Camera2d);
+    commands.spawn((Camera2d, GameCamera));
     commands.spawn((
         Sprite::from_color(Color::srgb(0.05, 0.08, 0.14), Vec2::ONE),
         Transform {
@@ -364,6 +368,27 @@ fn overlaps(a: Position, b: Position, radius: f32) -> bool {
     dx * dx + dy * dy <= radius * radius
 }
 
+fn gameplay_viewport_size(window_size: UVec2, panel_width: f32, scale_factor: f32) -> UVec2 {
+    let panel_width = (panel_width.max(0.0) * scale_factor.max(0.0)).round() as u32;
+    UVec2::new(
+        window_size.x.saturating_sub(panel_width).max(1),
+        window_size.y.max(1),
+    )
+}
+
+fn set_gameplay_viewport(
+    camera: &mut Camera,
+    window_size: UVec2,
+    panel_width: f32,
+    scale_factor: f32,
+) {
+    camera.viewport = Some(Viewport {
+        physical_position: UVec2::ZERO,
+        physical_size: gameplay_viewport_size(window_size, panel_width, scale_factor),
+        ..default()
+    });
+}
+
 fn despawn_out_of_bounds(
     mut commands: Commands,
     bullets: BulletPositionQuery,
@@ -384,15 +409,17 @@ fn despawn_out_of_bounds(
 
 fn script_panel(
     mut contexts: EguiContexts,
+    mut camera: Single<&mut Camera, With<GameCamera>>,
+    window: Single<&Window, With<PrimaryWindow>>,
     mut editor: ResMut<ScriptEditor>,
     score: Res<Score>,
     player: Query<(&Health, &AttackStyle, &AttackPower), With<Player>>,
     enemies: Query<&Enemy>,
 ) -> bevy::prelude::Result {
     let ctx = contexts.ctx_mut()?;
-    egui::SidePanel::right("rustscript_panel")
+    let panel_response = egui::SidePanel::right("rustscript_panel")
         .resizable(true)
-        .default_width(430.0)
+        .default_width(SCRIPT_PANEL_WIDTH)
         .show(ctx, |ui| {
             ui.heading("Live RustScript");
             ui.label("Edit the script, then Save. The running Bevy world updates in place.");
@@ -420,6 +447,12 @@ fn script_panel(
                 editor.pending_save = true;
             }
         });
+    set_gameplay_viewport(
+        &mut camera,
+        window.physical_size(),
+        panel_response.response.rect.width(),
+        window.scale_factor(),
+    );
     Ok(())
 }
 
@@ -430,13 +463,11 @@ mod tests {
     #[test]
     fn collisions_system_accepts_disjoint_player_and_enemy_health_queries() {
         let mut app = App::new();
-        app.insert_resource(Score(0)).add_systems(Update, collisions);
+        app.insert_resource(Score(0))
+            .add_systems(Update, collisions);
 
-        app.world_mut().spawn((
-            Player,
-            Position { x: 0.0, y: 0.0 },
-            Health(100),
-        ));
+        app.world_mut()
+            .spawn((Player, Position { x: 0.0, y: 0.0 }, Health(100)));
         app.world_mut().spawn((
             Enemy {
                 kind: "grunt".to_string(),
@@ -446,5 +477,13 @@ mod tests {
         ));
 
         app.update();
+    }
+
+    #[test]
+    fn gameplay_viewport_reserves_space_for_script_panel() {
+        assert_eq!(
+            gameplay_viewport_size(UVec2::new(1180, 720), SCRIPT_PANEL_WIDTH, 1.0),
+            UVec2::new(750, 720)
+        );
     }
 }
