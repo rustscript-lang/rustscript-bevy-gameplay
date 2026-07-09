@@ -883,6 +883,31 @@ struct VisualMotion {
 }
 
 #[derive(Component)]
+struct EnemyManeuver {
+    elapsed_secs: f32,
+    anchor_x: f32,
+}
+
+impl EnemyManeuver {
+    fn new(anchor_x: f32) -> Self {
+        Self {
+            elapsed_secs: 0.0,
+            anchor_x,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct EnemyMotionProfile {
+    descent_speed: f32,
+    lateral_speed: f32,
+    secondary_lateral_speed: f32,
+    frequency: f32,
+    phase: f32,
+    drift_speed: f32,
+}
+
+#[derive(Component)]
 struct FireClock {
     elapsed_ms: f32,
 }
@@ -1107,6 +1132,7 @@ fn attach_render_components(
             },
             EnemyShip,
             FireClock { elapsed_ms: 0.0 },
+            EnemyManeuver::new(position.x),
         ));
     }
 
@@ -1178,26 +1204,137 @@ fn move_player(
 fn enemy_motion(
     time: Res<Time>,
     flow: Res<GameFlow>,
-    mut query: Query<(&AttackStyle, &mut Position, &mut Velocity), With<Enemy>>,
+    mut query: Query<
+        (
+            &Enemy,
+            &AttackStyle,
+            &mut Position,
+            &mut Velocity,
+            Option<&mut EnemyManeuver>,
+        ),
+        With<Enemy>,
+    >,
 ) {
     if !flow.is_running() {
         return;
     }
 
-    for (style, mut position, mut velocity) in &mut query {
-        velocity.y = match style.0.as_str() {
-            "burst" => -65.0,
-            "wave" => -45.0,
-            _ => -55.0,
-        };
-        if style.0 == "wave" {
-            velocity.x = (time.elapsed_secs() * 3.0 + position.y * 0.02).sin() * 80.0;
-        } else {
-            velocity.x = 0.0;
+    for (enemy, style, mut position, mut velocity, maneuver) in &mut query {
+        let profile = enemy_motion_profile(enemy.kind.as_str(), style.0.as_str());
+        let mut elapsed_secs = time.elapsed_secs();
+        let mut anchor_x = position.x;
+        if let Some(mut maneuver) = maneuver {
+            maneuver.elapsed_secs += time.delta_secs();
+            elapsed_secs = maneuver.elapsed_secs;
+            anchor_x = maneuver.anchor_x;
         }
+        let weave = (elapsed_secs * profile.frequency + profile.phase + anchor_x * 0.011).sin();
+        let counter = (elapsed_secs * profile.frequency * 0.47 + profile.phase * 0.5).cos();
+        let dive = if enemy.kind == "striker" {
+            (elapsed_secs * 4.0 + profile.phase).sin().max(0.0) * 34.0
+        } else {
+            0.0
+        };
+
+        velocity.x = profile.drift_speed
+            + weave * profile.lateral_speed
+            + counter * profile.secondary_lateral_speed;
+        velocity.y = -(profile.descent_speed + dive);
         position.y += velocity.y * time.delta_secs();
         position.x = (position.x + velocity.x * time.delta_secs()).clamp(LEFT + 32.0, RIGHT - 32.0);
     }
+}
+
+fn enemy_motion_profile(kind: &str, style: &str) -> EnemyMotionProfile {
+    let mut profile = match kind {
+        "bomber" => EnemyMotionProfile {
+            descent_speed: 42.0,
+            lateral_speed: 44.0,
+            secondary_lateral_speed: 10.0,
+            frequency: 1.15,
+            phase: 0.9,
+            drift_speed: -8.0,
+        },
+        "weaver" | "ace" => EnemyMotionProfile {
+            descent_speed: 48.0,
+            lateral_speed: 92.0,
+            secondary_lateral_speed: 22.0,
+            frequency: 2.8,
+            phase: 1.8,
+            drift_speed: 0.0,
+        },
+        "tank" => EnemyMotionProfile {
+            descent_speed: 30.0,
+            lateral_speed: 8.0,
+            secondary_lateral_speed: 0.0,
+            frequency: 0.8,
+            phase: 2.4,
+            drift_speed: 0.0,
+        },
+        "sniper" => EnemyMotionProfile {
+            descent_speed: 34.0,
+            lateral_speed: 118.0,
+            secondary_lateral_speed: 18.0,
+            frequency: 0.95,
+            phase: 0.35,
+            drift_speed: 0.0,
+        },
+        "carrier" => EnemyMotionProfile {
+            descent_speed: 36.0,
+            lateral_speed: 58.0,
+            secondary_lateral_speed: 28.0,
+            frequency: 1.45,
+            phase: 2.1,
+            drift_speed: 6.0,
+        },
+        "striker" => EnemyMotionProfile {
+            descent_speed: 82.0,
+            lateral_speed: 70.0,
+            secondary_lateral_speed: 26.0,
+            frequency: 2.35,
+            phase: 1.25,
+            drift_speed: 18.0,
+        },
+        "boss" => EnemyMotionProfile {
+            descent_speed: 22.0,
+            lateral_speed: 76.0,
+            secondary_lateral_speed: 34.0,
+            frequency: 0.62,
+            phase: 2.8,
+            drift_speed: 0.0,
+        },
+        _ => EnemyMotionProfile {
+            descent_speed: 58.0,
+            lateral_speed: 28.0,
+            secondary_lateral_speed: 8.0,
+            frequency: 1.8,
+            phase: 0.15,
+            drift_speed: 0.0,
+        },
+    };
+
+    match style {
+        "burst" => {
+            profile.descent_speed += 10.0;
+            profile.frequency *= 0.88;
+        }
+        "wave" => {
+            profile.descent_speed = (profile.descent_speed - 5.0).max(18.0);
+            profile.lateral_speed += 28.0;
+            profile.frequency *= 1.18;
+        }
+        "missile" | "homing" => {
+            profile.descent_speed -= 3.0;
+            profile.drift_speed += 10.0;
+        }
+        "rail" | "laser" => {
+            profile.descent_speed -= 6.0;
+            profile.lateral_speed += 18.0;
+        }
+        _ => {}
+    }
+
+    profile
 }
 
 fn player_fire(
@@ -2631,6 +2768,70 @@ mod tests {
             .single(app.world())
             .expect("enemy should remain");
         assert_eq!(*position, Position { x: 10.0, y: 200.0 });
+    }
+
+    #[test]
+    fn enemy_motion_profiles_vary_by_enemy_kind() {
+        let scout = enemy_motion_profile("scout", "straight");
+        let tank = enemy_motion_profile("tank", "straight");
+        let weaver = enemy_motion_profile("weaver", "straight");
+        let striker = enemy_motion_profile("striker", "straight");
+        let sniper = enemy_motion_profile("sniper", "straight");
+
+        assert!(tank.descent_speed < scout.descent_speed);
+        assert!(striker.descent_speed > scout.descent_speed);
+        assert!(weaver.lateral_speed > scout.lateral_speed);
+        assert!(sniper.lateral_speed > tank.lateral_speed);
+        assert_ne!(weaver.phase, sniper.phase);
+    }
+
+    #[test]
+    fn enemy_motion_applies_kind_specific_trajectories() {
+        let mut app = App::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_millis(100));
+        app.insert_resource(time)
+            .insert_resource(GameFlow::Running)
+            .add_systems(Update, enemy_motion);
+
+        for kind in ["tank", "weaver", "striker"] {
+            app.world_mut().spawn((
+                Enemy {
+                    kind: kind.to_string(),
+                },
+                AttackStyle("straight".to_string()),
+                Position { x: 0.0, y: 200.0 },
+                Velocity { x: 0.0, y: -50.0 },
+                EnemyManeuver::new(0.0),
+            ));
+        }
+
+        app.update();
+
+        let mut enemies = app
+            .world_mut()
+            .query::<(&Enemy, &Position, &Velocity)>()
+            .iter(app.world())
+            .map(|(enemy, position, velocity)| (enemy.kind.clone(), *position, *velocity))
+            .collect::<Vec<_>>();
+        enemies.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let tank = enemies
+            .iter()
+            .find(|(kind, _, _)| kind == "tank")
+            .expect("tank should remain");
+        let weaver = enemies
+            .iter()
+            .find(|(kind, _, _)| kind == "weaver")
+            .expect("weaver should remain");
+        let striker = enemies
+            .iter()
+            .find(|(kind, _, _)| kind == "striker")
+            .expect("striker should remain");
+
+        assert!(tank.2.y.abs() < striker.2.y.abs());
+        assert!(weaver.2.x.abs() > tank.2.x.abs());
+        assert!(striker.1.y < tank.1.y);
     }
 
     #[test]
