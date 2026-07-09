@@ -586,7 +586,7 @@ fn attach_render_components(
             SpriteFrames::new(frames, 120.0),
             VisualMotion {
                 base_scale: Vec3::splat(3.1),
-                pulse: 0.035,
+                pulse: 0.0,
                 spin: 0.0,
                 phase: 0.0,
             },
@@ -607,7 +607,7 @@ fn attach_render_components(
             SpriteFrames::new(frames, 150.0),
             VisualMotion {
                 base_scale: Vec3::splat(3.0),
-                pulse: 0.045,
+                pulse: 0.0,
                 spin: 0.0,
                 phase: 1.5,
             },
@@ -1585,6 +1585,59 @@ mod tests {
     use super::*;
     use bevy::ecs::schedule::ScheduleLabel;
     use rustscript_bevy_gameplay::{ShooterEnemySpawnRule, ShooterSpawnTrigger};
+
+    fn test_shooter_assets() -> ShooterAssets {
+        let image = Handle::<Image>::default();
+        ShooterAssets {
+            background: image.clone(),
+            player_frames: vec![image.clone(), image.clone(), image.clone()],
+            enemy_red_frames: vec![image.clone(), image.clone(), image.clone()],
+            enemy_green_frames: vec![image.clone(), image.clone(), image.clone()],
+            enemy_yellow_frames: vec![image.clone(), image.clone(), image.clone()],
+            bolt_frames: vec![image.clone(), image.clone()],
+            laser_frames: vec![image.clone(), image.clone()],
+            player_missile_frames: vec![image.clone(), image.clone()],
+            enemy_missile_frames: vec![image.clone(), image.clone()],
+            shockwave_frames: vec![image],
+        }
+    }
+
+    #[test]
+    fn aircraft_visual_motion_does_not_scale_whole_sprite() {
+        let mut app = App::new();
+        app.insert_resource(test_shooter_assets())
+            .add_systems(Update, attach_render_components);
+
+        app.world_mut()
+            .spawn((Player, Position { x: 0.0, y: -360.0 }));
+        app.world_mut().spawn((
+            Enemy {
+                kind: "scout".to_string(),
+            },
+            Position { x: 0.0, y: 300.0 },
+        ));
+
+        app.update();
+
+        let player_pulse = {
+            let mut player_motion = app
+                .world_mut()
+                .query_filtered::<&VisualMotion, With<PlayerShip>>();
+            player_motion
+                .single(app.world())
+                .expect("player ship")
+                .pulse
+        };
+        let enemy_pulse = {
+            let mut enemy_motion = app
+                .world_mut()
+                .query_filtered::<&VisualMotion, With<EnemyShip>>();
+            enemy_motion.single(app.world()).expect("enemy ship").pulse
+        };
+
+        assert_eq!(player_pulse, 0.0);
+        assert_eq!(enemy_pulse, 0.0);
+    }
 
     #[test]
     fn collisions_system_accepts_disjoint_player_and_enemy_health_queries() {
