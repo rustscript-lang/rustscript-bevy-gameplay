@@ -1,5 +1,5 @@
 use bevy_ecs::prelude::*;
-use vm::{Value, Vm, VmStatus, compile_source};
+use vm::{CallOutcome, CallReturn, HostFunction, Value, Vm, VmError, VmStatus, compile_source};
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Health(pub i64);
@@ -54,9 +54,23 @@ fn evaluate_damage(source: &str, incoming: i64, armor: i64, critical: bool) -> R
     }
 }
 
+struct DamageFloorHost;
+
+impl HostFunction for DamageFloorHost {
+    fn call(&mut self, _vm: &mut Vm, args: &[Value]) -> Result<CallOutcome, VmError> {
+        match args {
+            [Value::Int(value)] => Ok(CallOutcome::Return(CallReturn::one(Value::Int(
+                (*value).max(1),
+            )))),
+            _ => Err(VmError::TypeMismatch("damage int")),
+        }
+    }
+}
+
 fn run_value(source: &str) -> Result<Value, String> {
     let compiled = compile_source(source).map_err(|err| err.to_string())?;
     let mut vm = Vm::new(compiled.program);
+    vm.bind_function("damage_floor", Box::new(DamageFloorHost));
     let status = vm.run().map_err(|err| err.to_string())?;
     if status != VmStatus::Halted {
         return Err(format!("script did not halt: {status:?}"));
