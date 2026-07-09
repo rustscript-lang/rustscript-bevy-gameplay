@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: target
+
+jobs:
+  build-examples:
+    name: Build Bevy examples (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            exe_suffix: ""
+          - os: windows-latest
+            platform: windows-x86_64
+            exe_suffix: ".exe"
+          - os: macos-14
+            platform: macos-arm64
+            exe_suffix: ""
+
+    steps:
+      - name: Checkout Bevy gameplay example
+        uses: actions/checkout@v4
+        with:
+          path: rustscript-bevy-gameplay
+
+      - name: Checkout RustScript / pd-vm
+        uses: actions/checkout@v4
+        with:
+          repository: rustscript-lang/rustscript
+          path: rustscript
+
+      - name: Checkout pd-edge sibling
+        uses: actions/checkout@v4
+        with:
+          repository: rustscript-lang/pd-edge
+          path: pd-edge
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev \
+            libudev-dev \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release example binaries
+        working-directory: rustscript-bevy-gameplay
+        run: cargo build --release --example combat --example shooter --locked
+
+      - name: Package example binaries
+        id: package
+        shell: python
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          EXE_SUFFIX: ${{ matrix.exe_suffix }}
+        run: |
+          import os
+          import pathlib
+          import shutil
+          import zipfile
+
+          root = pathlib.Path("rustscript-bevy-gameplay")
+          cargo_target_dir = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+          if not cargo_target_dir.is_absolute():
+              cargo_target_dir = root / cargo_target_dir
+          target_examples = cargo_target_dir / "release" / "examples"
+          package_name = f"rustscript-bevy-gameplay-examples-{os.environ['PLATFORM']}"
+          package_dir = root / "dist" / package_name
+          archive = root / "dist" / f"{package_name}.zip"
+          exe_suffix = os.environ.get("EXE_SUFFIX", "")
+
+          if package_dir.exists():
+              shutil.rmtree(package_dir)
+          package_dir.mkdir(parents=True, exist_ok=True)
+
+          for example in ("combat", "shooter"):
+              src = target_examples / f"{example}{exe_suffix}"
+              if not src.exists():
+                  raise FileNotFoundError(f"missing built example binary: {src}")
+              shutil.copy2(src, package_dir / f"{example}{exe_suffix}")
+
+          for extra in ("README.md", "LICENSE"):
+              shutil.copy2(root / extra, package_dir / extra)
+
+          with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+              for path in package_dir.rglob("*"):
+                  zf.write(path, path.relative_to(package_dir.parent))
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"archive={archive.as_posix()}\n")
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustscript-bevy-gameplay-examples-${{ matrix.platform }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+      - name: Upload release asset
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.archive }}
