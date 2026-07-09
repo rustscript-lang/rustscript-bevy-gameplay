@@ -83,10 +83,12 @@ fn main() {
         .add_plugins(EguiPlugin::default())
         .insert_resource(ClearColor(Color::srgb(0.055, 0.085, 0.14)))
         .insert_resource(Score(0))
+        .insert_resource(GameFlow::Running)
         .insert_resource(ScriptEditor {
             buffer: SCRIPT.to_string(),
             status: "Press Save or wait one frame for initial RustScript apply".to_string(),
             pending_save: true,
+            pending_restart: false,
         })
         .add_systems(Startup, setup)
         .add_systems(EguiPrimaryContextPass, script_panel)
@@ -107,6 +109,7 @@ fn main() {
                 animate_sprites,
                 animate_visual_motion,
                 collisions,
+                update_game_flow_after_health,
                 collect_rewards,
                 despawn_out_of_bounds,
             )
@@ -135,10 +138,32 @@ struct ScriptEditor {
     buffer: String,
     status: String,
     pending_save: bool,
+    pending_restart: bool,
 }
 
 #[derive(Resource, Deref, DerefMut)]
 struct Score(u32);
+
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+enum GameFlow {
+    Running,
+    Paused,
+    GameOver,
+}
+
+impl GameFlow {
+    fn is_running(self) -> bool {
+        self == Self::Running
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Running => "Running",
+            Self::Paused => "Paused",
+            Self::GameOver => "Game Over",
+        }
+    }
+}
 
 #[derive(Resource, Clone)]
 struct ShooterAssets {
@@ -419,11 +444,15 @@ fn spawn_starfield(commands: &mut Commands, assets: &ShooterAssets) {
 }
 
 fn apply_pending_script(world: &mut World) {
-    let Some(source) = ({
+    let Some((source, restart)) = ({
         let mut editor = world.resource_mut::<ScriptEditor>();
-        if editor.pending_save {
+        if editor.pending_restart {
+            editor.pending_restart = false;
             editor.pending_save = false;
-            Some(editor.buffer.clone())
+            Some((editor.buffer.clone(), true))
+        } else if editor.pending_save {
+            editor.pending_save = false;
+            Some((editor.buffer.clone(), false))
         } else {
             None
         }
@@ -431,12 +460,17 @@ fn apply_pending_script(world: &mut World) {
         return;
     };
 
-    let result = apply_shooter_script(world, &source);
+    let result = if restart {
+        restart_gameplay(world, &source)
+    } else {
+        apply_shooter_script(world, &source)
+    };
     let mut editor = world.resource_mut::<ScriptEditor>();
     match result {
         Ok(summary) => {
+            let verb = if restart { "Restarted" } else { "Applied live" };
             editor.status = format!(
-                "Applied live: hp {}, attack {} / power {}, enemies {}",
+                "{verb}: hp {}, attack {} / power {}, enemies {}",
                 summary.player_health,
                 summary.player_attack_style,
                 summary.player_attack_power,
@@ -445,6 +479,59 @@ fn apply_pending_script(world: &mut World) {
         }
         Err(err) => {
             editor.status = format!("RustScript error: {err}");
+        }
+    }
+}
+
+fn restart_gameplay(
+    world: &mut World,
+    source: &str,
+) -> Result<rustscript_bevy_gameplay::ShooterSummary, String> {
+    despawn_entities_with::<Projectile>(world);
+    despawn_entities_with::<Enemy>(world);
+    despawn_entities_with::<RewardItem>(world);
+    reset_player_runtime(world);
+
+    if let Some(mut score) = world.get_resource_mut::<Score>() {
+        score.0 = 0;
+    } else {
+        world.insert_resource(Score(0));
+    }
+    if let Some(mut flow) = world.get_resource_mut::<GameFlow>() {
+        *flow = GameFlow::Running;
+    } else {
+        world.insert_resource(GameFlow::Running);
+    }
+
+    apply_shooter_script(world, source)
+}
+
+fn despawn_entities_with<T: Component>(world: &mut World) {
+    let entities = world
+        .query_filtered::<Entity, With<T>>()
+        .iter(world)
+        .collect::<Vec<_>>();
+    for entity in entities {
+        let _despawned = world.despawn(entity);
+    }
+}
+
+fn reset_player_runtime(world: &mut World) {
+    let players = world
+        .query_filtered::<Entity, With<Player>>()
+        .iter(world)
+        .collect::<Vec<_>>();
+    for entity in players {
+        if let Some(mut position) = world.get_mut::<Position>(entity) {
+            position.x = 0.0;
+            position.y = -360.0;
+        }
+        if let Some(mut velocity) = world.get_mut::<Velocity>(entity) {
+            velocity.x = 0.0;
+            velocity.y = 0.0;
+        }
+        if let Some(mut clock) = world.get_mut::<FireClock>(entity) {
+            clock.elapsed_ms = 0.0;
         }
     }
 }
@@ -529,8 +616,13 @@ fn attach_render_components(
 fn move_player(
     input: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
+    flow: Res<GameFlow>,
     mut query: Query<(&Health, &mut Position), With<Player>>,
 ) {
+    if !flow.is_running() {
+        return;
+    }
+
     let mut direction = Vec2::ZERO;
     if input.pressed(KeyCode::ArrowLeft) || input.pressed(KeyCode::KeyA) {
         direction.x -= 1.0;
@@ -560,8 +652,13 @@ fn move_player(
 
 fn enemy_motion(
     time: Res<Time>,
+    flow: Res<GameFlow>,
     mut query: Query<(&AttackStyle, &mut Position, &mut Velocity), With<Enemy>>,
 ) {
+    if !flow.is_running() {
+        return;
+    }
+
     for (style, mut position, mut velocity) in &mut query {
         velocity.y = match style.0.as_str() {
             "burst" => -65.0,
@@ -582,6 +679,7 @@ fn player_fire(
     mut commands: Commands,
     assets: Res<ShooterAssets>,
     time: Res<Time>,
+    flow: Res<GameFlow>,
     mut query: Query<
         (
             &Position,
@@ -595,6 +693,10 @@ fn player_fire(
         With<Player>,
     >,
 ) {
+    if !flow.is_running() {
+        return;
+    }
+
     for (position, style, power, cooldown, loadout, health, mut clock) in &mut query {
         if health.0 <= 0 {
             continue;
@@ -625,8 +727,13 @@ fn enemy_fire(
     mut commands: Commands,
     assets: Res<ShooterAssets>,
     time: Res<Time>,
+    flow: Res<GameFlow>,
     mut query: Query<(&Position, &AttackStyle, &AttackPower, &mut FireClock), With<Enemy>>,
 ) {
+    if !flow.is_running() {
+        return;
+    }
+
     for (position, style, power, mut clock) in &mut query {
         clock.elapsed_ms += time.delta_secs() * 1000.0;
         let cooldown = if style.0 == "burst" { 1200.0 } else { 1500.0 };
@@ -961,10 +1068,15 @@ fn projectile_rotation(velocity: Vec2, owner: ProjectileOwner) -> Quat {
 
 fn guide_homing_projectiles(
     time: Res<Time>,
+    flow: Res<GameFlow>,
     mut projectiles: Query<(&Position, &mut Velocity, &Projectile, &Homing)>,
     enemies: Query<&Position, With<Enemy>>,
     players: Query<&Position, (With<Player>, Without<Enemy>)>,
 ) {
+    if !flow.is_running() {
+        return;
+    }
+
     for (position, mut velocity, projectile, homing) in &mut projectiles {
         let target = match projectile.owner {
             ProjectileOwner::Player => nearest_target(*position, enemies.iter()),
@@ -1024,7 +1136,11 @@ fn homing_velocity_step(
     }
 }
 
-fn apply_velocity(time: Res<Time>, mut query: MovingProjectileQuery) {
+fn apply_velocity(time: Res<Time>, flow: Res<GameFlow>, mut query: MovingProjectileQuery) {
+    if !flow.is_running() {
+        return;
+    }
+
     for (velocity, mut position) in &mut query {
         position.x += velocity.x * time.delta_secs();
         position.y += velocity.y * time.delta_secs();
@@ -1034,8 +1150,13 @@ fn apply_velocity(time: Res<Time>, mut query: MovingProjectileQuery) {
 fn tick_lifetimes(
     mut commands: Commands,
     time: Res<Time>,
+    flow: Res<GameFlow>,
     mut query: Query<(Entity, &mut Lifetime)>,
 ) {
+    if !flow.is_running() {
+        return;
+    }
+
     for (entity, mut lifetime) in &mut query {
         lifetime.elapsed_ms += time.delta_secs() * 1000.0;
         if lifetime.elapsed_ms >= lifetime.duration_ms {
@@ -1045,6 +1166,7 @@ fn tick_lifetimes(
 }
 
 fn update_shockwaves(
+    flow: Res<GameFlow>,
     mut query: Query<(
         &mut Projectile,
         &Shockwave,
@@ -1053,6 +1175,10 @@ fn update_shockwaves(
         Option<&mut VisualMotion>,
     )>,
 ) {
+    if !flow.is_running() {
+        return;
+    }
+
     for (mut projectile, shockwave, lifetime, mut transform, motion) in &mut query {
         let radius = shockwave_radius_at(
             lifetime.elapsed_ms,
@@ -1115,10 +1241,15 @@ fn animate_visual_motion(time: Res<Time>, mut query: Query<(&mut Transform, &mut
 fn collisions(
     mut commands: Commands,
     mut score: ResMut<Score>,
+    flow: Res<GameFlow>,
     mut projectiles: Query<(Entity, &Position, &Projectile, Option<&mut HitTargets>)>,
     mut enemies: Query<(Entity, &Position, &mut Health), (With<Enemy>, Without<Player>)>,
     mut players: Query<(&Position, &mut Health), (With<Player>, Without<Enemy>)>,
 ) {
+    if !flow.is_running() {
+        return;
+    }
+
     for (projectile_entity, projectile_pos, projectile, mut hit_targets) in &mut projectiles {
         match projectile.owner {
             ProjectileOwner::Player => {
@@ -1163,11 +1294,28 @@ fn collisions(
     }
 }
 
+fn update_game_flow_after_health(
+    mut flow: ResMut<GameFlow>,
+    players: Query<&Health, With<Player>>,
+) {
+    if *flow == GameFlow::GameOver {
+        return;
+    }
+    if players.iter().any(|health| health.0 <= 0) {
+        *flow = GameFlow::GameOver;
+    }
+}
+
 fn collect_rewards(
     mut commands: Commands,
+    flow: Res<GameFlow>,
     mut players: Query<(&Position, &mut Health, &mut PlayerProjectileLoadout), With<Player>>,
     rewards: Query<(Entity, &Position, &RewardItem), Without<Player>>,
 ) {
+    if !flow.is_running() {
+        return;
+    }
+
     let Some((player_position, mut health, mut loadout)) = players.iter_mut().next() else {
         return;
     };
@@ -1216,9 +1364,14 @@ fn distance_squared(a: Position, b: Position) -> f32 {
 
 fn despawn_out_of_bounds(
     mut commands: Commands,
+    flow: Res<GameFlow>,
     bullets: BulletPositionQuery,
     enemies: ScriptManagedEnemyPositionQuery,
 ) {
+    if !flow.is_running() {
+        return;
+    }
+
     for (entity, position) in &bullets {
         if position.x < LEFT - 140.0
             || position.x > RIGHT + 140.0
@@ -1238,6 +1391,7 @@ fn despawn_out_of_bounds(
 fn script_panel(
     mut contexts: EguiContexts,
     mut editor: ResMut<ScriptEditor>,
+    mut flow: ResMut<GameFlow>,
     score: Res<Score>,
     player: Query<
         (
@@ -1251,6 +1405,28 @@ fn script_panel(
     enemies: Query<&Enemy>,
 ) -> bevy::prelude::Result {
     let ctx = contexts.ctx_mut()?;
+    if *flow == GameFlow::GameOver {
+        egui::Area::new(egui::Id::new("game_over_overlay"))
+            .anchor(
+                egui::Align2::CENTER_CENTER,
+                egui::vec2(-(SCRIPT_PANEL_WIDTH * 0.5), 0.0),
+            )
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgba_unmultiplied(8, 14, 24, 215))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgb(120, 170, 210),
+                    ))
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .inner_margin(egui::Margin::symmetric(18, 14))
+                    .show(ui, |ui| {
+                        ui.heading("Game Over");
+                        ui.label("Press Restart to run the script again.");
+                    });
+            });
+    }
+
     if let Some((health, _, _, loadout)) = player.iter().next() {
         let ratio = (health.0.max(0) as f32 / PLAYER_MAX_HEALTH as f32).clamp(0.0, 1.0);
         egui::Area::new(egui::Id::new("shooter_hud"))
@@ -1282,6 +1458,29 @@ fn script_panel(
         .default_width(SCRIPT_PANEL_WIDTH)
         .show(ctx, |ui| {
             ui.heading("Live RustScript");
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Restart").clicked() {
+                    editor.pending_restart = true;
+                }
+
+                let pause_label = if *flow == GameFlow::Paused {
+                    "Resume"
+                } else {
+                    "Pause"
+                };
+                if ui
+                    .add_enabled(*flow != GameFlow::GameOver, egui::Button::new(pause_label))
+                    .clicked()
+                {
+                    *flow = if *flow == GameFlow::Paused {
+                        GameFlow::Running
+                    } else {
+                        GameFlow::Paused
+                    };
+                }
+            });
+            ui.label(format!("State: {}", flow.label()));
             ui.separator();
             if let Some((health, style, power, loadout)) = player.iter().next() {
                 ui.label(format!(
@@ -1322,6 +1521,7 @@ mod tests {
     fn collisions_system_accepts_disjoint_player_and_enemy_health_queries() {
         let mut app = App::new();
         app.insert_resource(Score(0))
+            .insert_resource(GameFlow::Running)
             .add_systems(Update, collisions);
 
         app.world_mut()
@@ -1341,6 +1541,7 @@ mod tests {
     fn enemy_projectile_damage_clamps_player_health_to_zero() {
         let mut app = App::new();
         app.insert_resource(Score(0))
+            .insert_resource(GameFlow::Running)
             .add_systems(Update, collisions);
 
         app.world_mut()
@@ -1363,6 +1564,107 @@ mod tests {
             .single(app.world())
             .expect("player should remain");
         assert_eq!(health.0, 0);
+    }
+
+    #[test]
+    fn game_flow_changes_to_game_over_when_player_health_is_zero() {
+        let mut app = App::new();
+        app.insert_resource(GameFlow::Running)
+            .add_systems(Update, update_game_flow_after_health);
+
+        app.world_mut()
+            .spawn((Player, Position { x: 0.0, y: 0.0 }, Health(0)));
+
+        app.update();
+
+        assert_eq!(*app.world().resource::<GameFlow>(), GameFlow::GameOver);
+    }
+
+    #[test]
+    fn paused_gameplay_does_not_advance_enemy_motion() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(GameFlow::Paused)
+            .add_systems(Update, enemy_motion);
+
+        app.world_mut().spawn((
+            Enemy {
+                kind: "scout".to_string(),
+            },
+            AttackStyle("straight".to_string()),
+            Position { x: 10.0, y: 200.0 },
+            Velocity { x: 0.0, y: -50.0 },
+        ));
+
+        app.update();
+
+        let position = app
+            .world_mut()
+            .query::<&Position>()
+            .single(app.world())
+            .expect("enemy should remain");
+        assert_eq!(*position, Position { x: 10.0, y: 200.0 });
+    }
+
+    #[test]
+    fn restarting_game_resets_score_player_position_and_dynamic_entities() {
+        let mut app = App::new();
+        app.insert_resource(Score(9))
+            .insert_resource(GameFlow::GameOver);
+
+        app.world_mut().spawn((
+            Player,
+            Health(0),
+            AttackStyle("laser".to_string()),
+            AttackPower(99),
+            AttackCooldownMs(10),
+            PlayerProjectileLoadout {
+                kind: "laser".to_string(),
+                count: 5,
+            },
+            Position { x: 99.0, y: 99.0 },
+            Velocity { x: 12.0, y: 12.0 },
+            FireClock { elapsed_ms: 800.0 },
+        ));
+        app.world_mut().spawn((
+            Position { x: 0.0, y: 0.0 },
+            Projectile {
+                owner: ProjectileOwner::Player,
+                damage: 10,
+                radius: 10.0,
+                pierces: false,
+            },
+        ));
+
+        let summary = restart_gameplay(app.world_mut(), SCRIPT).expect("restart should apply");
+
+        assert_eq!(summary.player_health, 95);
+        assert_eq!(**app.world().resource::<Score>(), 0);
+        assert_eq!(*app.world().resource::<GameFlow>(), GameFlow::Running);
+
+        let (_, health, position, loadout, clock) = app
+            .world_mut()
+            .query::<(
+                &Player,
+                &Health,
+                &Position,
+                &PlayerProjectileLoadout,
+                &FireClock,
+            )>()
+            .single(app.world())
+            .expect("player should remain");
+        assert_eq!(health.0, 95);
+        assert_eq!(*position, Position { x: 0.0, y: -360.0 });
+        assert_eq!(loadout.kind, "bolt");
+        assert_eq!(loadout.count, 1);
+        assert_eq!(clock.elapsed_ms, 0.0);
+
+        let projectile_count = app
+            .world_mut()
+            .query::<&Projectile>()
+            .iter(app.world())
+            .count();
+        assert_eq!(projectile_count, 0);
     }
 
     #[test]
@@ -1467,6 +1769,7 @@ mod tests {
     #[test]
     fn collecting_rewards_updates_player_health_and_projectile_count() {
         let mut app = App::new();
+        app.insert_resource(GameFlow::Running);
         app.add_systems(Update, collect_rewards);
         app.world_mut().spawn((
             Player,
