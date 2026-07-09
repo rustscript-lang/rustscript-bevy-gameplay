@@ -49,7 +49,7 @@ fn shooter_example_script_smoke_runs_end_to_end() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains(
-            "player_hp=95, attack=straight:8, projectiles=bolt:1, enemies=4, rewards=2, enemy_rules=2, reward_rules=1"
+            "player_hp=95, attack=straight:8, projectiles=bolt:1, enemies=7, rewards=2, enemy_rules=2, reward_rules=1"
         ),
         "unexpected shooter example stdout:\n{stdout}"
     );

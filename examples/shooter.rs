@@ -311,6 +311,9 @@ enum ProjectileKind {
     Laser,
     HomingMissile,
     Shockwave,
+    Plasma,
+    Flak,
+    Rail,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -757,20 +760,26 @@ fn enemy_fire(
     assets: Res<ShooterAssets>,
     time: Res<Time>,
     flow: Res<GameFlow>,
-    mut query: Query<(&Position, &AttackStyle, &AttackPower, &mut FireClock), With<Enemy>>,
+    mut query: Query<(
+        &Enemy,
+        &Position,
+        &AttackStyle,
+        &AttackPower,
+        &mut FireClock,
+    )>,
 ) {
     if !flow.is_running() {
         return;
     }
 
-    for (position, style, power, mut clock) in &mut query {
+    for (enemy, position, style, power, mut clock) in &mut query {
         clock.elapsed_ms += time.delta_secs() * 1000.0;
-        let cooldown = if style.0 == "burst" { 1200.0 } else { 1500.0 };
+        let cooldown = enemy_fire_cooldown_ms(enemy.kind.as_str(), style.0.as_str());
         if clock.elapsed_ms < cooldown {
             continue;
         }
         clock.elapsed_ms = 0.0;
-        for shot in projectile_plan(ProjectileOwner::Enemy, style.0.as_str(), power.0, None) {
+        for shot in enemy_projectile_plan(enemy.kind.as_str(), style.0.as_str(), power.0) {
             spawn_projectile(
                 &mut commands,
                 &assets,
@@ -779,6 +788,16 @@ fn enemy_fire(
                 shot,
             );
         }
+    }
+}
+
+fn enemy_fire_cooldown_ms(kind: &str, style: &str) -> f32 {
+    match kind {
+        "sniper" => 1850.0,
+        "striker" => 980.0,
+        "carrier" => 1350.0,
+        _ if style == "burst" => 1200.0,
+        _ => 1500.0,
     }
 }
 
@@ -794,28 +813,76 @@ fn projectile_plan(
         return player_projectile_plan(kind, count, power);
     }
 
-    let sign = owner.forward_sign();
+    enemy_projectile_plan("", style, power)
+}
+
+fn enemy_projectile_plan(kind: &str, style: &str, power: i64) -> Vec<ProjectileShot> {
+    let enemy_sign = ProjectileOwner::Enemy.forward_sign();
+    match kind {
+        "sniper" => {
+            return vec![ProjectileShot {
+                kind: ProjectileKind::Rail,
+                damage: power + 12,
+                velocity: Vec2::new(0.0, 900.0 * enemy_sign),
+            }];
+        }
+        "carrier" => {
+            return vec![
+                ProjectileShot {
+                    kind: ProjectileKind::HomingMissile,
+                    damage: power + 7,
+                    velocity: Vec2::new(-45.0, 340.0 * enemy_sign),
+                },
+                ProjectileShot {
+                    kind: ProjectileKind::Plasma,
+                    damage: power + 5,
+                    velocity: Vec2::new(45.0, 430.0 * enemy_sign),
+                },
+            ];
+        }
+        "striker" => {
+            return vec![
+                ProjectileShot {
+                    kind: ProjectileKind::Flak,
+                    damage: power,
+                    velocity: Vec2::new(-110.0, 640.0 * enemy_sign),
+                },
+                ProjectileShot {
+                    kind: ProjectileKind::Flak,
+                    damage: power,
+                    velocity: Vec2::new(0.0, 700.0 * enemy_sign),
+                },
+                ProjectileShot {
+                    kind: ProjectileKind::Flak,
+                    damage: power,
+                    velocity: Vec2::new(110.0, 640.0 * enemy_sign),
+                },
+            ];
+        }
+        _ => {}
+    }
+
     match style {
         "spread" => vec![
             ProjectileShot {
                 kind: ProjectileKind::Spread,
                 damage: power,
-                velocity: Vec2::new(-90.0, 460.0 * sign),
+                velocity: Vec2::new(-90.0, 460.0 * enemy_sign),
             },
             ProjectileShot {
                 kind: ProjectileKind::Spread,
                 damage: power,
-                velocity: Vec2::new(0.0, 500.0 * sign),
+                velocity: Vec2::new(0.0, 500.0 * enemy_sign),
             },
             ProjectileShot {
                 kind: ProjectileKind::Spread,
                 damage: power,
-                velocity: Vec2::new(90.0, 460.0 * sign),
+                velocity: Vec2::new(90.0, 460.0 * enemy_sign),
             },
             ProjectileShot {
                 kind: ProjectileKind::HomingMissile,
                 damage: power + 5,
-                velocity: Vec2::new(0.0, 330.0 * sign),
+                velocity: Vec2::new(0.0, 330.0 * enemy_sign),
             },
             ProjectileShot {
                 kind: ProjectileKind::Shockwave,
@@ -827,36 +894,36 @@ fn projectile_plan(
             ProjectileShot {
                 kind: ProjectileKind::Laser,
                 damage: power * 2,
-                velocity: Vec2::new(0.0, 760.0 * sign),
+                velocity: Vec2::new(0.0, 760.0 * enemy_sign),
             },
             ProjectileShot {
                 kind: ProjectileKind::HomingMissile,
                 damage: power + 7,
-                velocity: Vec2::new(0.0, 360.0 * sign),
+                velocity: Vec2::new(0.0, 360.0 * enemy_sign),
             },
         ],
         "burst" => vec![
             ProjectileShot {
                 kind: ProjectileKind::Spread,
                 damage: power,
-                velocity: Vec2::new(-80.0, 260.0 * sign),
+                velocity: Vec2::new(-80.0, 260.0 * enemy_sign),
             },
             ProjectileShot {
                 kind: ProjectileKind::Spread,
                 damage: power,
-                velocity: Vec2::new(80.0, 260.0 * sign),
+                velocity: Vec2::new(80.0, 260.0 * enemy_sign),
             },
             ProjectileShot {
                 kind: ProjectileKind::HomingMissile,
                 damage: power + 4,
-                velocity: Vec2::new(0.0, 300.0 * sign),
+                velocity: Vec2::new(0.0, 300.0 * enemy_sign),
             },
         ],
         "wave" => vec![
             ProjectileShot {
                 kind: ProjectileKind::Bolt,
                 damage: power + 2,
-                velocity: Vec2::new(120.0, 240.0 * sign),
+                velocity: Vec2::new(120.0, 240.0 * enemy_sign),
             },
             ProjectileShot {
                 kind: ProjectileKind::Shockwave,
@@ -867,17 +934,32 @@ fn projectile_plan(
         "missile" | "homing" => vec![ProjectileShot {
             kind: ProjectileKind::HomingMissile,
             damage: power + 8,
-            velocity: Vec2::new(0.0, 360.0 * sign),
+            velocity: Vec2::new(0.0, 360.0 * enemy_sign),
         }],
         "shockwave" => vec![ProjectileShot {
             kind: ProjectileKind::Shockwave,
             damage: power,
             velocity: Vec2::ZERO,
         }],
+        "plasma" => vec![ProjectileShot {
+            kind: ProjectileKind::Plasma,
+            damage: power + 6,
+            velocity: Vec2::new(0.0, 430.0 * enemy_sign),
+        }],
+        "flak" => vec![ProjectileShot {
+            kind: ProjectileKind::Flak,
+            damage: power,
+            velocity: Vec2::new(0.0, 520.0 * enemy_sign),
+        }],
+        "rail" => vec![ProjectileShot {
+            kind: ProjectileKind::Rail,
+            damage: power + 10,
+            velocity: Vec2::new(0.0, 880.0 * enemy_sign),
+        }],
         _ => vec![ProjectileShot {
             kind: ProjectileKind::Bolt,
             damage: power,
-            velocity: Vec2::new(0.0, 520.0 * sign),
+            velocity: Vec2::new(0.0, 520.0 * enemy_sign),
         }],
     }
 }
@@ -890,6 +972,9 @@ fn player_projectile_plan(kind: &str, count: i64, power: i64) -> Vec<ProjectileS
         "laser" => ProjectileKind::Laser,
         "missile" | "homing" => ProjectileKind::HomingMissile,
         "shockwave" => ProjectileKind::Shockwave,
+        "plasma" => ProjectileKind::Plasma,
+        "flak" => ProjectileKind::Flak,
+        "rail" => ProjectileKind::Rail,
         _ => ProjectileKind::Bolt,
     };
 
@@ -902,6 +987,9 @@ fn player_projectile_plan(kind: &str, count: i64, power: i64) -> Vec<ProjectileS
                 ProjectileKind::Laser => (power + 4, 760.0),
                 ProjectileKind::HomingMissile => (power + 6, 360.0),
                 ProjectileKind::Shockwave => ((power / 2).max(4), 0.0),
+                ProjectileKind::Plasma => (power + 5, 470.0),
+                ProjectileKind::Flak => (power + 1, 610.0),
+                ProjectileKind::Rail => (power + 10, 920.0),
             };
             ProjectileShot {
                 kind: shot_kind,
@@ -935,8 +1023,10 @@ fn spawn_projectile(
         y: origin.y + owner.forward_sign() * spec.spawn_offset,
     };
     let frames = projectile_frames(assets, owner, shot.kind);
+    let mut sprite = Sprite::from_image(frames[0].clone());
+    sprite.color = projectile_color(owner, shot.kind);
     let mut entity = commands.spawn((
-        Sprite::from_image(frames[0].clone()),
+        sprite,
         Transform {
             translation: Vec3::new(spawn_position.x, spawn_position.y, 3.0),
             scale: Vec3::splat(spec.scale),
@@ -1066,6 +1156,39 @@ fn projectile_spec(kind: ProjectileKind) -> ProjectileSpec {
             pierces: true,
             lifetime_ms: Some(620.0),
         },
+        ProjectileKind::Plasma => ProjectileSpec {
+            radius: 22.0,
+            scale: 1.45,
+            speed: 470.0,
+            spawn_offset: 38.0,
+            frame_ms: 70.0,
+            pulse: 0.14,
+            spin: 0.08,
+            pierces: false,
+            lifetime_ms: None,
+        },
+        ProjectileKind::Flak => ProjectileSpec {
+            radius: 13.0,
+            scale: 0.95,
+            speed: 610.0,
+            spawn_offset: 32.0,
+            frame_ms: 65.0,
+            pulse: 0.08,
+            spin: 0.18,
+            pierces: false,
+            lifetime_ms: None,
+        },
+        ProjectileKind::Rail => ProjectileSpec {
+            radius: 15.0,
+            scale: 1.75,
+            speed: 920.0,
+            spawn_offset: 42.0,
+            frame_ms: 45.0,
+            pulse: 0.06,
+            spin: 0.0,
+            pierces: true,
+            lifetime_ms: None,
+        },
     }
 }
 
@@ -1076,12 +1199,27 @@ fn projectile_frames(
 ) -> Vec<Handle<Image>> {
     match kind {
         ProjectileKind::Bolt | ProjectileKind::Spread => assets.bolt_frames.clone(),
-        ProjectileKind::Laser => assets.laser_frames.clone(),
+        ProjectileKind::Laser | ProjectileKind::Plasma | ProjectileKind::Rail => {
+            assets.laser_frames.clone()
+        }
         ProjectileKind::HomingMissile => match owner {
             ProjectileOwner::Player => assets.player_missile_frames.clone(),
             ProjectileOwner::Enemy => assets.enemy_missile_frames.clone(),
         },
         ProjectileKind::Shockwave => assets.shockwave_frames.clone(),
+        ProjectileKind::Flak => assets.bolt_frames.clone(),
+    }
+}
+
+fn projectile_color(owner: ProjectileOwner, kind: ProjectileKind) -> Color {
+    match (owner, kind) {
+        (_, ProjectileKind::Plasma) => Color::srgba(0.55, 0.95, 1.0, 0.96),
+        (_, ProjectileKind::Flak) => Color::srgba(1.0, 0.82, 0.3, 0.96),
+        (_, ProjectileKind::Rail) => Color::srgba(0.78, 0.62, 1.0, 0.98),
+        (ProjectileOwner::Enemy, ProjectileKind::Bolt | ProjectileKind::Spread) => {
+            Color::srgba(1.0, 0.58, 0.28, 0.96)
+        }
+        _ => Color::WHITE,
     }
 }
 
@@ -1284,7 +1422,7 @@ fn collisions(
     mut score: ResMut<Score>,
     flow: Res<GameFlow>,
     mut projectiles: Query<(Entity, &Position, &Projectile, Option<&mut HitTargets>)>,
-    mut enemies: Query<(Entity, &Position, &mut Health), (With<Enemy>, Without<Player>)>,
+    mut enemies: Query<(Entity, &Enemy, &Position, &mut Health), Without<Player>>,
     mut players: Query<(&Position, &mut Health), (With<Player>, Without<Enemy>)>,
 ) {
     if !flow.is_running() {
@@ -1294,7 +1432,7 @@ fn collisions(
     for (projectile_entity, projectile_pos, projectile, mut hit_targets) in &mut projectiles {
         match projectile.owner {
             ProjectileOwner::Player => {
-                for (enemy_entity, enemy_pos, mut health) in &mut enemies {
+                for (enemy_entity, enemy, enemy_pos, mut health) in &mut enemies {
                     if !overlaps(*projectile_pos, *enemy_pos, projectile.radius) {
                         continue;
                     }
@@ -1307,6 +1445,7 @@ fn collisions(
                         commands.entity(projectile_entity).despawn();
                     }
                     if health.0 <= 0 {
+                        commands.spawn((reward_drop_for_enemy(enemy.kind.as_str()), *enemy_pos));
                         commands.entity(enemy_entity).despawn();
                         **score += 1;
                     }
@@ -1332,6 +1471,27 @@ fn collisions(
                 }
             }
         }
+    }
+}
+
+fn reward_drop_for_enemy(kind: &str) -> RewardItem {
+    match kind {
+        "tank" => RewardItem {
+            kind: "health".to_string(),
+            amount: 20,
+        },
+        "boss" => RewardItem {
+            kind: "health".to_string(),
+            amount: 35,
+        },
+        "bomber" | "carrier" => RewardItem {
+            kind: "bullets".to_string(),
+            amount: 2,
+        },
+        _ => RewardItem {
+            kind: "bullets".to_string(),
+            amount: 1,
+        },
     }
 }
 
@@ -1657,6 +1817,44 @@ mod tests {
         ));
 
         app.update();
+    }
+
+    #[test]
+    fn defeated_enemy_drops_reward_at_enemy_position() {
+        let mut app = App::new();
+        app.insert_resource(Score(0))
+            .insert_resource(GameFlow::Running)
+            .add_systems(Update, collisions);
+
+        app.world_mut()
+            .spawn((Player, Position { x: 0.0, y: -360.0 }, Health(100)));
+        app.world_mut().spawn((
+            Enemy {
+                kind: "tank".to_string(),
+            },
+            Position { x: 44.0, y: 188.0 },
+            Health(5),
+        ));
+        app.world_mut().spawn((
+            Position { x: 44.0, y: 188.0 },
+            Projectile {
+                owner: ProjectileOwner::Player,
+                damage: 8,
+                radius: 18.0,
+                pierces: false,
+            },
+        ));
+
+        app.update();
+
+        let (reward, position) = app
+            .world_mut()
+            .query::<(&RewardItem, &Position)>()
+            .single(app.world())
+            .expect("defeated enemy should drop a reward");
+        assert_eq!(reward.kind, "health");
+        assert_eq!(reward.amount, 20);
+        assert_eq!(*position, Position { x: 44.0, y: 188.0 });
     }
 
     #[test]
@@ -2015,6 +2213,48 @@ true;
         assert_eq!(player_missile[0].kind, enemy_missile[0].kind);
         assert!(player_missile[0].velocity.y > 0.0);
         assert!(enemy_missile[0].velocity.y < 0.0);
+    }
+
+    #[test]
+    fn enemy_projectile_plan_varies_by_enemy_kind() {
+        let sniper = enemy_projectile_plan("sniper", "straight", 10);
+        assert_eq!(sniper[0].kind, ProjectileKind::Rail);
+        assert!(sniper[0].velocity.y < -800.0);
+
+        let carrier = enemy_projectile_plan("carrier", "burst", 10);
+        assert!(
+            carrier
+                .iter()
+                .any(|shot| shot.kind == ProjectileKind::HomingMissile)
+        );
+        assert!(
+            carrier
+                .iter()
+                .any(|shot| shot.kind == ProjectileKind::Plasma)
+        );
+
+        let striker = enemy_projectile_plan("striker", "straight", 10);
+        assert!(striker.iter().all(|shot| shot.kind == ProjectileKind::Flak));
+        assert!(striker.iter().all(|shot| shot.velocity.y <= -620.0));
+    }
+
+    #[test]
+    fn player_loadout_supports_new_projectile_types() {
+        let plasma = player_projectile_plan("plasma", 2, 10);
+        assert_eq!(plasma.len(), 2);
+        assert!(
+            plasma
+                .iter()
+                .all(|shot| shot.kind == ProjectileKind::Plasma)
+        );
+
+        let rail = player_projectile_plan("rail", 1, 10);
+        assert_eq!(rail[0].kind, ProjectileKind::Rail);
+        assert!(rail[0].velocity.y > 850.0);
+
+        let flak = player_projectile_plan("flak", 3, 10);
+        assert_eq!(flak.len(), 3);
+        assert!(flak.iter().all(|shot| shot.kind == ProjectileKind::Flak));
     }
 
     #[test]

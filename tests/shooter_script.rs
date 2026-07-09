@@ -18,7 +18,7 @@ fn rustscript_spawns_player_and_enemy_waves() {
     assert_eq!(summary.player_attack_power, 8);
     assert_eq!(summary.player_projectile_kind, "bolt");
     assert_eq!(summary.player_projectile_count, 1);
-    assert_eq!(summary.enemies_spawned, 4);
+    assert_eq!(summary.enemies_spawned, 7);
     assert_eq!(summary.rewards_spawned, 2);
 
     let (_, health, style, power, loadout) = world
@@ -39,11 +39,24 @@ fn rustscript_spawns_player_and_enemy_waves() {
 
     let mut enemy_query = world.query::<(&Enemy, &Health, &AttackStyle, &AttackPower, &Position)>();
     let enemies = enemy_query.iter(&world).collect::<Vec<_>>();
-    assert_eq!(enemies.len(), 4);
-    assert!(enemies.iter().all(|(_, _, _, power, _)| power.0 <= 4));
+    assert_eq!(enemies.len(), 7);
+    assert!(enemies.iter().all(|(_, _, _, power, _)| power.0 <= 6));
     assert!(enemies.iter().any(|(enemy, health, style, _, position)| {
         enemy.kind == "bomber" && health.0 == 42 && style.0 == "burst" && position.y == 450.0
     }));
+    assert!(enemies.iter().any(|(enemy, health, style, _, position)| {
+        enemy.kind == "sniper" && health.0 == 36 && style.0 == "rail" && position.y == 390.0
+    }));
+    assert!(
+        enemies
+            .iter()
+            .any(|(enemy, _, style, _, _)| enemy.kind == "carrier" && style.0 == "burst")
+    );
+    assert!(
+        enemies
+            .iter()
+            .any(|(enemy, _, style, _, _)| enemy.kind == "striker" && style.0 == "flak")
+    );
 
     let mut rewards = world.query::<(&RewardItem, &Position)>();
     let rewards = rewards.iter(&world).collect::<Vec<_>>();
@@ -101,12 +114,12 @@ true;
     assert_eq!(power.0, 31);
     assert_eq!(loadout.kind, "missile");
     assert_eq!(loadout.count, 3);
-    assert_eq!(summary.enemies_spawned, 5);
+    assert_eq!(summary.enemies_spawned, 8);
     assert_eq!(summary.rewards_spawned, 3);
 
     let mut enemies = world.query::<(&Enemy, &Health, &AttackStyle)>();
     let spawned = enemies.iter(&world).collect::<Vec<_>>();
-    assert_eq!(spawned.len(), 5);
+    assert_eq!(spawned.len(), 8);
     assert!(
         spawned
             .iter()
@@ -142,7 +155,7 @@ true;
 "#;
     let summary = apply_shooter_script(&mut world, updated).expect("updated script should apply");
 
-    assert_eq!(summary.enemies_spawned, 5);
+    assert_eq!(summary.enemies_spawned, 8);
     assert_eq!(summary.rewards_spawned, 3);
 
     let mut enemies = world.query::<&Enemy>();
@@ -150,7 +163,7 @@ true;
         .iter(&world)
         .map(|enemy| enemy.kind.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(enemy_kinds.len(), 5);
+    assert_eq!(enemy_kinds.len(), 8);
     assert!(enemy_kinds.contains(&"bomber"));
     assert!(enemy_kinds.contains(&"ace"));
 
@@ -158,7 +171,7 @@ true;
         .query_filtered::<Entity, With<ScriptManagedEnemy>>()
         .iter(&world)
         .count();
-    assert_eq!(script_enemy_count, 5);
+    assert_eq!(script_enemy_count, 8);
 
     let reward_count = world
         .query_filtered::<Entity, With<ScriptManagedReward>>()

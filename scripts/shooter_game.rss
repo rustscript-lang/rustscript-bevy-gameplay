@@ -8,12 +8,15 @@ let scout: bool = bevy::Shooter::spawn_enemy("scout", 18, "straight", -170, 500)
 let bomber: bool = bevy::Shooter::spawn_enemy("bomber", 42, "burst", -40, 450);
 let wave: bool = bevy::Shooter::spawn_enemy("weaver", 28, "wave", 120, 520);
 let tank: bool = bevy::Shooter::spawn_enemy("tank", 65, "straight", 210, 470);
+let sniper: bool = bevy::Shooter::spawn_enemy("sniper", 36, "rail", -210, 390);
+let carrier: bool = bevy::Shooter::spawn_enemy("carrier", 75, "burst", 40, 560);
+let striker: bool = bevy::Shooter::spawn_enemy("striker", 24, "flak", 190, 410);
 
 let bullets: bool = bevy::Shooter::spawn_reward("bullets", 1, -120, -220);
 let health: bool = bevy::Shooter::spawn_reward("health", 20, 130, -280);
 
 let reinforcements: bool =
-    bevy::Shooter::spawn_enemy_every("scout", 16, "straight", -210, 530, 7000);
+    bevy::Shooter::spawn_enemy_every("striker", 24, "flak", -210, 530, 7000);
 let supply_drop: bool =
     bevy::Shooter::spawn_reward_every("bullets", 1, 0, -260, 12000);
 let boss_wave: bool =
