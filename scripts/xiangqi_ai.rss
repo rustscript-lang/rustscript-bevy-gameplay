@@ -2,11 +2,64 @@ use bevy;
 
 let width: int = bevy::Xiangqi::board_width();
 let height: int = bevy::Xiangqi::board_height();
+let opponent: int = 0 - ai_player;
 let mut best_from_x: int = -1;
 let mut best_from_y: int = -1;
 let mut best_to_x: int = -1;
 let mut best_to_y: int = -1;
-let mut best_score: int = -1000000;
+let mut best_score: int = -10000000;
+
+let mut own_general_x_seed: int = -1;
+let mut own_general_y_seed: int = -1;
+let mut seed_y: int = 0;
+while seed_y < height {
+    let mut seed_x: int = 0;
+    while seed_x < width {
+        let seed_piece: int = bevy::Xiangqi::cell(seed_x, seed_y);
+        let seed_mark: bool = if seed_piece == ai_player => {
+            own_general_x_seed = seed_x;
+            own_general_y_seed = seed_y;
+            true
+        } else => {
+            false
+        };
+        seed_x = seed_x + 1;
+    }
+    seed_y = seed_y + 1;
+}
+
+let guard_left_piece: int = bevy::Xiangqi::cell(own_general_x_seed - 1, own_general_y_seed);
+let guard_left: bool = if own_general_x_seed > 3 => {
+    let guard_left_enemy: bool = if guard_left_piece * opponent > 0 => {
+        best_score = 72000;
+        best_from_x = own_general_x_seed;
+        best_from_y = own_general_y_seed;
+        best_to_x = own_general_x_seed - 1;
+        best_to_y = own_general_y_seed;
+        true
+    } else => {
+        false
+    };
+    true
+} else => {
+    false
+};
+let guard_right_piece: int = bevy::Xiangqi::cell(own_general_x_seed + 1, own_general_y_seed);
+let guard_right: bool = if own_general_x_seed < 5 => {
+    let guard_right_enemy: bool = if guard_right_piece * opponent > 0 => {
+        best_score = 72000;
+        best_from_x = own_general_x_seed;
+        best_from_y = own_general_y_seed;
+        best_to_x = own_general_x_seed + 1;
+        best_to_y = own_general_y_seed;
+        true
+    } else => {
+        false
+    };
+    true
+} else => {
+    false
+};
 
 let mut from_y_scan: int = 0;
 while from_y_scan < height {
@@ -217,8 +270,7 @@ while from_y_scan < height {
                     false
                 };
 
-                let source_destination_ok: bool = own_piece && target_ok;
-                let mut legal: bool = source_destination_ok && valid_shape;
+                let mut legal: bool = own_piece && target_ok && valid_shape;
                 let trial: bool = if legal => {
                     let cleared: bool = bevy::Xiangqi::set_cell(from_x_scan, from_y_scan, 0);
                     let written: bool = bevy::Xiangqi::set_cell(to_x_scan, to_y_scan, piece);
@@ -274,15 +326,45 @@ while from_y_scan < height {
                 } else => {
                     false
                 };
-                let undo: bool = if trial => {
-                    let restore_from: bool = bevy::Xiangqi::set_cell(from_x_scan, from_y_scan, piece);
-                    let restore_to: bool = bevy::Xiangqi::set_cell(to_x_scan, to_y_scan, target);
-                    true
-                } else => {
-                    false
-                };
 
                 let scored: bool = if legal => {
+                    let own_general_x: int = if ai_player == 1 => { red_general_x } else => { black_general_x };
+                    let own_general_y: int = if ai_player == 1 => { red_general_y } else => { black_general_y };
+                    let mut direct_general_danger: int = 0;
+                    let moved_file_blocker: bool = from_x_scan == own_general_x && to_x_scan != own_general_x;
+                    let danger_scan: bool = if moved_file_blocker => {
+                        let risk_step_y: int = if ai_player == -1 => { 1 } else => { -1 };
+                        let mut risk_y: int = own_general_y + risk_step_y;
+                        let mut risk_done: bool = false;
+                        while risk_done == false && risk_y >= 0 && risk_y < height {
+                            let risk_piece: int = bevy::Xiangqi::cell(own_general_x, risk_y);
+                            let risk_hit: bool = if risk_piece != 0 => {
+                                let risk_enemy: bool = risk_piece * opponent > 0;
+                                let mut risk_abs: int = risk_piece;
+                                let risk_abs_step: bool = if risk_abs < 0 => {
+                                    risk_abs = 0 - risk_abs;
+                                    true
+                                } else => {
+                                    false
+                                };
+                                let risk_rook: bool = if risk_enemy && (risk_abs == 5 || risk_abs == 1) => {
+                                    direct_general_danger = 200000;
+                                    true
+                                } else => {
+                                    false
+                                };
+                                risk_done = true;
+                                true
+                            } else => {
+                                false
+                            };
+                            risk_y = risk_y + risk_step_y;
+                        }
+                        true
+                    } else => {
+                        false
+                    };
+
                     let mut target_abs: int = target;
                     let target_abs_step: bool = if target_abs < 0 => {
                         target_abs = 0 - target_abs;
@@ -319,7 +401,7 @@ while from_y_scan < height {
                         false
                     };
                     let advance: int = if ai_player == -1 => { to_y_scan } else => { 9 - to_y_scan };
-                    let score: int = value + advance * 8 + (4 - center_dx) * 3 + abs_piece;
+                    let score: int = value + advance * 8 + (4 - center_dx) * 3 + abs_piece - direct_general_danger;
                     let selected: bool = if score > best_score => {
                         best_score = score;
                         best_from_x = from_x_scan;
@@ -330,6 +412,14 @@ while from_y_scan < height {
                     } else => {
                         false
                     };
+                    true
+                } else => {
+                    false
+                };
+
+                let undo: bool = if trial => {
+                    let restore_from: bool = bevy::Xiangqi::set_cell(from_x_scan, from_y_scan, piece);
+                    let restore_to: bool = bevy::Xiangqi::set_cell(to_x_scan, to_y_scan, target);
                     true
                 } else => {
                     false

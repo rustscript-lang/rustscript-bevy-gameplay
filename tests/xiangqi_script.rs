@@ -14,8 +14,10 @@ const RED_CHARIOT: i64 = 5;
 const RED_CANNON: i64 = 6;
 const RED_SOLDIER: i64 = 7;
 const BLACK_GENERAL: i64 = -1;
+const BLACK_ADVISOR: i64 = -2;
 const BLACK_HORSE: i64 = -4;
 const BLACK_CHARIOT: i64 = -5;
+const BLACK_CANNON: i64 = -6;
 const BLACK_SOLDIER: i64 = -7;
 
 fn seeded_world(pieces: &[(i64, i64, i64)]) -> bevy_ecs::world::World {
@@ -102,6 +104,66 @@ fn rustscript_ai_captures_general_when_available() {
     assert!(ai_move.telemetry.jit_enabled);
     assert!(ai_move.telemetry.jit_trace_count > 0);
     assert!(ai_move.telemetry.elapsed_micros > 0);
+}
+
+#[test]
+fn rustscript_ai_uses_general_to_answer_close_threat() {
+    let mut world = seeded_world(&[
+        (4, 9, RED_GENERAL),
+        (4, 5, BLACK_SOLDIER),
+        (4, 0, BLACK_GENERAL),
+        (3, 0, RED_CHARIOT),
+        (5, 0, BLACK_ADVISOR),
+    ]);
+
+    let ai_move = choose_xiangqi_ai_move(&mut world, AI_SCRIPT, BLACK)
+        .expect("AI script should choose a move");
+
+    assert_eq!(
+        (ai_move.from_x, ai_move.from_y, ai_move.to_x, ai_move.to_y),
+        (4, 0, 3, 0)
+    );
+}
+
+#[test]
+fn rustscript_ai_avoids_opening_an_immediate_general_loss() {
+    let mut world = seeded_world(&[
+        (8, 9, RED_GENERAL),
+        (4, 8, RED_CHARIOT),
+        (3, 5, RED_HORSE),
+        (4, 5, BLACK_SOLDIER),
+        (4, 0, BLACK_GENERAL),
+        (1, 2, BLACK_CANNON),
+    ]);
+
+    let black_move = choose_xiangqi_ai_move(&mut world, AI_SCRIPT, BLACK)
+        .expect("AI script should choose a move");
+    let black_summary = apply_xiangqi_move_script(
+        &mut world,
+        MOVE_SCRIPT,
+        black_move.from_x,
+        black_move.from_y,
+        black_move.to_x,
+        black_move.to_y,
+        BLACK,
+    )
+    .expect("black move script should run");
+    assert!(black_summary.legal);
+
+    let red_reply = choose_xiangqi_ai_move(&mut world, AI_SCRIPT, RED)
+        .expect("red AI script should choose a reply");
+    let red_summary = apply_xiangqi_move_script(
+        &mut world,
+        MOVE_SCRIPT,
+        red_reply.from_x,
+        red_reply.from_y,
+        red_reply.to_x,
+        red_reply.to_y,
+        RED,
+    )
+    .expect("red reply script should run");
+
+    assert_ne!(red_summary.winner, RED);
 }
 
 #[test]
