@@ -1825,6 +1825,100 @@ mod tests {
     }
 
     #[test]
+    fn applying_script_live_keeps_existing_dynamic_entities() {
+        let live_source = r#"
+use bevy;
+let hp: bool = bevy::Shooter::set_player_health(77);
+let enemy: bool = bevy::Shooter::spawn_enemy("ace", 55, "wave", 0, 470);
+let reward: bool = bevy::Shooter::spawn_reward("health", 25, 40, -360);
+true;
+"#;
+        let mut app = App::new();
+        app.insert_resource(Score(3))
+            .insert_resource(GameFlow::Running)
+            .insert_resource(ScriptEditor {
+                buffer: live_source.to_string(),
+                status: String::new(),
+                pending_save: true,
+                pending_restart: false,
+            });
+        app.world_mut().spawn((
+            Player,
+            Health(95),
+            AttackStyle("straight".to_string()),
+            AttackPower(8),
+            AttackCooldownMs(260),
+            PlayerProjectileLoadout {
+                kind: "bolt".to_string(),
+                count: 1,
+            },
+            Position { x: 0.0, y: -360.0 },
+            Velocity { x: 0.0, y: 0.0 },
+        ));
+        app.world_mut().spawn((
+            Enemy {
+                kind: "bomber".to_string(),
+            },
+            Health(42),
+            AttackStyle("burst".to_string()),
+            AttackPower(3),
+            AttackCooldownMs(1400),
+            Position { x: -40.0, y: 450.0 },
+            Velocity { x: 0.0, y: -50.0 },
+            ScriptManagedEnemy,
+        ));
+        app.world_mut().spawn((
+            RewardItem {
+                kind: "bullets".to_string(),
+                amount: 1,
+            },
+            Position {
+                x: -120.0,
+                y: -220.0,
+            },
+        ));
+        app.world_mut().spawn((
+            Position { x: 0.0, y: -80.0 },
+            Velocity { x: 0.0, y: 560.0 },
+            Projectile {
+                owner: ProjectileOwner::Player,
+                damage: 8,
+                radius: 10.0,
+                pierces: false,
+            },
+        ));
+
+        apply_pending_script(app.world_mut());
+
+        let enemies = app
+            .world_mut()
+            .query::<&Enemy>()
+            .iter(app.world())
+            .map(|enemy| enemy.kind.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(enemies.len(), 2);
+        assert!(enemies.contains(&"bomber"));
+        assert!(enemies.contains(&"ace"));
+
+        let rewards = app
+            .world_mut()
+            .query::<&RewardItem>()
+            .iter(app.world())
+            .map(|reward| reward.kind.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(rewards.len(), 2);
+        assert!(rewards.contains(&"bullets"));
+        assert!(rewards.contains(&"health"));
+
+        let projectile_count = app
+            .world_mut()
+            .query::<&Projectile>()
+            .iter(app.world())
+            .count();
+        assert_eq!(projectile_count, 1);
+    }
+
+    #[test]
     fn default_window_reserves_space_for_script_panel() {
         assert_eq!(
             default_window_size(),

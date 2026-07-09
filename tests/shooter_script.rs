@@ -2,7 +2,8 @@ use bevy_ecs::prelude::*;
 use pretty_assertions::assert_eq;
 use rustscript_bevy_gameplay::{
     AttackPower, AttackStyle, Enemy, Health, Player, PlayerProjectileLoadout, Position, RewardItem,
-    ShooterSpawnRules, apply_shooter_script, tick_shooter_spawn_rules,
+    ScriptManagedEnemy, ScriptManagedReward, ShooterSpawnRules, apply_shooter_script,
+    tick_shooter_spawn_rules,
 };
 
 #[test]
@@ -100,22 +101,70 @@ true;
     assert_eq!(power.0, 31);
     assert_eq!(loadout.kind, "missile");
     assert_eq!(loadout.count, 3);
-    assert_eq!(summary.enemies_spawned, 1);
-    assert_eq!(summary.rewards_spawned, 1);
+    assert_eq!(summary.enemies_spawned, 5);
+    assert_eq!(summary.rewards_spawned, 3);
 
     let mut enemies = world.query::<(&Enemy, &Health, &AttackStyle)>();
     let spawned = enemies.iter(&world).collect::<Vec<_>>();
-    assert_eq!(spawned.len(), 1);
-    assert_eq!(spawned[0].0.kind, "ace");
-    assert_eq!(spawned[0].1.0, 55);
-    assert_eq!(spawned[0].2.0, "wave");
+    assert_eq!(spawned.len(), 5);
+    assert!(
+        spawned
+            .iter()
+            .any(|(enemy, health, style)| enemy.kind == "ace"
+                && health.0 == 55
+                && style.0 == "wave")
+    );
 
     let mut rewards = world.query::<(&RewardItem, &Position)>();
     let spawned_rewards = rewards.iter(&world).collect::<Vec<_>>();
-    assert_eq!(spawned_rewards.len(), 1);
-    assert_eq!(spawned_rewards[0].0.kind, "health");
-    assert_eq!(spawned_rewards[0].0.amount, 25);
-    assert_eq!(spawned_rewards[0].1.y, -360.0);
+    assert_eq!(spawned_rewards.len(), 3);
+    assert!(
+        spawned_rewards
+            .iter()
+            .any(|(reward, position)| reward.kind == "health"
+                && reward.amount == 25
+                && position.y == -360.0)
+    );
+}
+
+#[test]
+fn reapplying_script_keeps_existing_script_spawned_entities() {
+    let mut world = World::new();
+    apply_shooter_script(&mut world, include_str!("../scripts/shooter_game.rss"))
+        .expect("initial script should apply");
+
+    let updated = r#"
+use bevy;
+let hp: bool = bevy::Shooter::set_player_health(77);
+let enemy: bool = bevy::Shooter::spawn_enemy("ace", 55, "wave", 0, 470);
+let reward: bool = bevy::Shooter::spawn_reward("health", 25, 40, -360);
+true;
+"#;
+    let summary = apply_shooter_script(&mut world, updated).expect("updated script should apply");
+
+    assert_eq!(summary.enemies_spawned, 5);
+    assert_eq!(summary.rewards_spawned, 3);
+
+    let mut enemies = world.query::<&Enemy>();
+    let enemy_kinds = enemies
+        .iter(&world)
+        .map(|enemy| enemy.kind.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(enemy_kinds.len(), 5);
+    assert!(enemy_kinds.contains(&"bomber"));
+    assert!(enemy_kinds.contains(&"ace"));
+
+    let script_enemy_count = world
+        .query_filtered::<Entity, With<ScriptManagedEnemy>>()
+        .iter(&world)
+        .count();
+    assert_eq!(script_enemy_count, 5);
+
+    let reward_count = world
+        .query_filtered::<Entity, With<ScriptManagedReward>>()
+        .iter(&world)
+        .count();
+    assert_eq!(reward_count, 3);
 }
 
 #[test]

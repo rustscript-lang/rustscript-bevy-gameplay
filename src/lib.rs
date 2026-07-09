@@ -145,8 +145,6 @@ pub fn apply_scripted_damage(
 
 pub fn apply_shooter_script(world: &mut World, source: &str) -> Result<ShooterSummary, String> {
     compile_source(source).map_err(|err| err.to_string())?;
-    clear_script_managed_entities::<ScriptManagedEnemy>(world);
-    clear_script_managed_entities::<ScriptManagedReward>(world);
     world.insert_resource(ShooterSpawnRules::default());
     with_shooter_context(world, || run_shooter_value(source))?;
     summarize_shooter_world(world)
@@ -229,16 +227,6 @@ impl ShooterSpawnTrigger {
                 }
             }
         }
-    }
-}
-
-fn clear_script_managed_entities<T: Component>(world: &mut World) {
-    let entities = world
-        .query_filtered::<Entity, With<T>>()
-        .iter(world)
-        .collect::<Vec<_>>();
-    for entity in entities {
-        let _despawned = world.despawn(entity);
     }
 }
 
