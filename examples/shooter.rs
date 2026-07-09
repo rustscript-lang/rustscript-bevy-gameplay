@@ -1124,7 +1124,8 @@ fn homing_velocity_step(
     }
 
     let current = Vec2::new(current.x, current.y);
-    let desired = to_target.normalize() * speed;
+    let forward_sign = current.y.signum();
+    let desired = forward_homing_direction(to_target, forward_sign) * speed;
     let next = if current.length_squared() == 0.0 {
         desired
     } else {
@@ -1134,6 +1135,17 @@ fn homing_velocity_step(
         x: next.x,
         y: next.y,
     }
+}
+
+fn forward_homing_direction(to_target: Vec2, forward_sign: f32) -> Vec2 {
+    let target_direction = to_target.normalize();
+    if forward_sign == 0.0 || target_direction.y.signum() == forward_sign {
+        return target_direction;
+    }
+
+    let side = target_direction.x;
+    let forward = forward_sign * (1.0 - side.abs()).max(0.08);
+    Vec2::new(side, forward).normalize()
 }
 
 fn apply_velocity(time: Res<Time>, flow: Res<GameFlow>, mut query: MovingProjectileQuery) {
@@ -1825,6 +1837,33 @@ mod tests {
 
         assert!(velocity.y > 0.0);
         assert!(velocity.x > 0.0);
+    }
+
+    #[test]
+    fn homing_velocity_keeps_forward_axis_when_target_is_behind() {
+        let player_velocity = homing_velocity_step(
+            Velocity { x: 0.0, y: 360.0 },
+            Position { x: 0.0, y: 0.0 },
+            Position {
+                x: 120.0,
+                y: -200.0,
+            },
+            360.0,
+            1.0,
+        );
+        assert!(player_velocity.y > 0.0);
+
+        let enemy_velocity = homing_velocity_step(
+            Velocity { x: 0.0, y: -360.0 },
+            Position { x: 0.0, y: 0.0 },
+            Position {
+                x: -120.0,
+                y: 200.0,
+            },
+            360.0,
+            1.0,
+        );
+        assert!(enemy_velocity.y < 0.0);
     }
 
     #[test]
