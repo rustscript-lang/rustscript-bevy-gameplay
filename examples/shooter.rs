@@ -1,10 +1,10 @@
 use bevy::{
-    camera::{Viewport, visibility::RenderLayers},
+    camera::{OrthographicProjection, Projection, ScalingMode},
     prelude::*,
-    window::PrimaryWindow,
 };
 use bevy_egui::{
-    EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui,
+    EguiContexts, EguiGlobalSettings, EguiMultipassSchedule, EguiPlugin, EguiPrimaryContextPass,
+    PrimaryEguiContext, egui,
 };
 use rustscript_bevy_gameplay::{
     AttackCooldownMs, AttackPower, AttackStyle, Enemy, Health, Player, Position,
@@ -18,12 +18,43 @@ const RIGHT: f32 = 520.0;
 const TOP: f32 = 260.0;
 const BOTTOM: f32 = -260.0;
 const SCRIPT_PANEL_WIDTH: f32 = 430.0;
+const GAMEPLAY_VIEW_WIDTH: u32 = 1180;
+const GAMEPLAY_VIEW_HEIGHT: u32 = 720;
+const GAMEPLAY_WORLD_PADDING_X: f32 = 320.0;
+const GAMEPLAY_WORLD_PADDING_Y: f32 = 240.0;
 
 fn shooter_asset_file_path() -> String {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("assets")
         .to_string_lossy()
         .to_string()
+}
+
+fn gameplay_camera_transform() -> Transform {
+    Transform::from_xyz((LEFT + RIGHT) * 0.5, (TOP + BOTTOM) * 0.5, 0.0)
+}
+
+fn gameplay_view_fraction() -> f32 {
+    GAMEPLAY_VIEW_WIDTH as f32 / default_window_size().x as f32
+}
+
+fn gameplay_camera_projection() -> Projection {
+    let gameplay_fraction = gameplay_view_fraction();
+    Projection::Orthographic(OrthographicProjection {
+        viewport_origin: Vec2::new(gameplay_fraction * 0.5, 0.5),
+        scaling_mode: ScalingMode::AutoMin {
+            min_width: (RIGHT - LEFT + GAMEPLAY_WORLD_PADDING_X) / gameplay_fraction,
+            min_height: TOP - BOTTOM + GAMEPLAY_WORLD_PADDING_Y,
+        },
+        ..OrthographicProjection::default_2d()
+    })
+}
+
+fn default_window_size() -> UVec2 {
+    UVec2::new(
+        GAMEPLAY_VIEW_WIDTH + SCRIPT_PANEL_WIDTH.round() as u32,
+        GAMEPLAY_VIEW_HEIGHT,
+    )
 }
 
 fn main() {
@@ -38,7 +69,7 @@ fn main() {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "RustScript Bevy Shooter".to_string(),
-                        resolution: (1180, 720).into(),
+                        resolution: default_window_size().into(),
                         ..default()
                     }),
                     ..default()
@@ -319,16 +350,13 @@ fn setup(
     egui_global_settings.auto_create_primary_context = false;
     let assets = ShooterAssets::load(&asset_server);
 
-    commands.spawn((Camera2d, GameCamera));
     commands.spawn((
         PrimaryEguiContext,
+        EguiMultipassSchedule::new(EguiPrimaryContextPass),
         Camera2d,
-        RenderLayers::none(),
-        Camera {
-            order: 1,
-            clear_color: ClearColorConfig::None,
-            ..default()
-        },
+        GameCamera,
+        gameplay_camera_transform(),
+        gameplay_camera_projection(),
     ));
     spawn_starfield(&mut commands, &assets);
     commands.insert_resource(assets);
@@ -1034,27 +1062,6 @@ fn distance_squared(a: Position, b: Position) -> f32 {
     dx * dx + dy * dy
 }
 
-fn gameplay_viewport_size(window_size: UVec2, panel_width: f32, scale_factor: f32) -> UVec2 {
-    let panel_width = (panel_width.max(0.0) * scale_factor.max(0.0)).round() as u32;
-    UVec2::new(
-        window_size.x.saturating_sub(panel_width).max(1),
-        window_size.y.max(1),
-    )
-}
-
-fn set_gameplay_viewport(
-    camera: &mut Camera,
-    window_size: UVec2,
-    panel_width: f32,
-    scale_factor: f32,
-) {
-    camera.viewport = Some(Viewport {
-        physical_position: UVec2::ZERO,
-        physical_size: gameplay_viewport_size(window_size, panel_width, scale_factor),
-        ..default()
-    });
-}
-
 fn despawn_out_of_bounds(
     mut commands: Commands,
     bullets: BulletPositionQuery,
@@ -1075,15 +1082,13 @@ fn despawn_out_of_bounds(
 
 fn script_panel(
     mut contexts: EguiContexts,
-    mut camera: Single<&mut Camera, With<GameCamera>>,
-    window: Single<&Window, With<PrimaryWindow>>,
     mut editor: ResMut<ScriptEditor>,
     score: Res<Score>,
     player: Query<(&Health, &AttackStyle, &AttackPower), With<Player>>,
     enemies: Query<&Enemy>,
 ) -> bevy::prelude::Result {
     let ctx = contexts.ctx_mut()?;
-    let panel_response = egui::SidePanel::right("rustscript_panel")
+    egui::SidePanel::right("rustscript_panel")
         .resizable(true)
         .default_width(SCRIPT_PANEL_WIDTH)
         .show(ctx, |ui| {
@@ -1113,18 +1118,13 @@ fn script_panel(
                 editor.pending_save = true;
             }
         });
-    set_gameplay_viewport(
-        &mut camera,
-        window.physical_size(),
-        panel_response.response.rect.width(),
-        window.scale_factor(),
-    );
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::schedule::ScheduleLabel;
 
     #[test]
     fn collisions_system_accepts_disjoint_player_and_enemy_health_queries() {
@@ -1146,11 +1146,52 @@ mod tests {
     }
 
     #[test]
-    fn gameplay_viewport_reserves_space_for_script_panel() {
+    fn default_window_reserves_space_for_script_panel() {
         assert_eq!(
-            gameplay_viewport_size(UVec2::new(1180, 720), SCRIPT_PANEL_WIDTH, 1.0),
-            UVec2::new(750, 720)
+            default_window_size(),
+            UVec2::new(
+                GAMEPLAY_VIEW_WIDTH + SCRIPT_PANEL_WIDTH.round() as u32,
+                GAMEPLAY_VIEW_HEIGHT
+            )
         );
+        assert!((gameplay_view_fraction() - 1180.0 / 1610.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn game_camera_frames_full_world_inside_reserved_viewport() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Image>()
+            .insert_resource(EguiGlobalSettings::default())
+            .add_systems(Startup, setup);
+        app.update();
+
+        let mut cameras = app
+            .world_mut()
+            .query_filtered::<(&Transform, &Projection), With<GameCamera>>();
+        let (transform, projection) = cameras
+            .single(app.world())
+            .expect("game camera should have a projection");
+
+        assert_eq!(transform.translation.x, (LEFT + RIGHT) * 0.5);
+
+        let Projection::Orthographic(projection) = projection else {
+            panic!("game camera should use orthographic projection");
+        };
+        let ScalingMode::AutoMin {
+            min_width,
+            min_height,
+        } = projection.scaling_mode
+        else {
+            panic!("game camera should frame the full world, not raw window pixels");
+        };
+
+        assert_eq!(
+            projection.viewport_origin,
+            Vec2::new(gameplay_view_fraction() * 0.5, 0.5)
+        );
+        assert!(min_width * gameplay_view_fraction() >= RIGHT - LEFT + GAMEPLAY_WORLD_PADDING_X);
+        assert!(min_height >= TOP - BOTTOM + GAMEPLAY_WORLD_PADDING_Y);
     }
 
     #[test]
@@ -1221,7 +1262,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_uses_separate_cameras_for_gameplay_and_egui() {
+    fn setup_uses_one_camera_for_gameplay_and_egui() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
             .init_asset::<Image>()
@@ -1238,13 +1279,14 @@ mod tests {
         let mut game_cameras = app.world_mut().query_filtered::<Entity, With<GameCamera>>();
         assert_eq!(game_cameras.iter(app.world()).count(), 1);
 
-        let mut egui_cameras = app
+        let mut egui_game_cameras = app
             .world_mut()
-            .query_filtered::<&Camera, (With<PrimaryEguiContext>, Without<GameCamera>)>();
-        let egui_camera = egui_cameras
+            .query_filtered::<(&Camera, &EguiMultipassSchedule), (With<PrimaryEguiContext>, With<GameCamera>)>();
+        let (egui_camera, egui_schedule) = egui_game_cameras
             .single(app.world())
-            .expect("egui should render through its own camera");
-        assert_eq!(egui_camera.order, 1);
+            .expect("egui should render through the gameplay camera");
+        assert_eq!(egui_camera.order, 0);
         assert!(egui_camera.viewport.is_none());
+        assert_eq!(egui_schedule.0, EguiPrimaryContextPass.intern());
     }
 }
