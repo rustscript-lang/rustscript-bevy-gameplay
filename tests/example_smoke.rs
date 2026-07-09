@@ -22,3 +22,33 @@ fn combat_example_runs_end_to_end() {
         "unexpected combat example stdout:\n{stdout}"
     );
 }
+
+#[test]
+fn shooter_example_script_smoke_runs_end_to_end() {
+    let output = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()))
+        .args([
+            "run",
+            "--quiet",
+            "--example",
+            "shooter",
+            "--",
+            "--script-smoke",
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("shooter example smoke should launch");
+
+    assert!(
+        output.status.success(),
+        "shooter smoke failed\nstatus: {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("player_hp=120, attack=spread:14, enemies=4"),
+        "unexpected shooter example stdout:\n{stdout}"
+    );
+}
