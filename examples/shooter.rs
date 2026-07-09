@@ -12,6 +12,7 @@ use rustscript_bevy_gameplay::{
     tick_shooter_spawn_rules,
 };
 use std::f32::consts::FRAC_PI_2;
+use vm::{SourceError, SourceMap, compile_source};
 
 const SCRIPT: &str = include_str!("../scripts/shooter_game.rss");
 const LEFT: f32 = -260.0;
@@ -89,6 +90,7 @@ fn main() {
         .insert_resource(ScriptEditor {
             buffer: SCRIPT.to_string(),
             status: "Press Save or wait one frame for initial RustScript apply".to_string(),
+            diagnostics: Vec::new(),
             pending_save: true,
             pending_restart: false,
         })
@@ -146,8 +148,45 @@ fn run_script_smoke() {
 struct ScriptEditor {
     buffer: String,
     status: String,
+    diagnostics: Vec<ScriptDiagnostic>,
     pending_save: bool,
     pending_restart: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScriptDiagnostic {
+    line: usize,
+    start_col: usize,
+    end_col: usize,
+    message: String,
+    source_line: String,
+    start_byte: usize,
+    end_byte: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScriptTokenKind {
+    Keyword,
+    Type,
+    Number,
+    String,
+    Comment,
+    Function,
+    HostApi,
+    Operator,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScriptToken {
+    start: usize,
+    end: usize,
+    kind: ScriptTokenKind,
+}
+
+impl ScriptToken {
+    fn text<'a>(self, source: &'a str) -> &'a str {
+        &source[self.start..self.end]
+    }
 }
 
 #[derive(Resource, Deref, DerefMut)]
@@ -176,6 +215,419 @@ impl GameFlow {
             Self::Paused => "Paused",
             Self::GameOver => "Game Over",
         }
+    }
+}
+
+const SCRIPT_KEYWORDS: &[&str] = &[
+    "as", "break", "continue", "else", "false", "fn", "for", "if", "let", "match", "mut", "null",
+    "pub", "return", "struct", "true", "use", "while",
+];
+
+const SCRIPT_TYPES: &[&str] = &[
+    "array", "bool", "bytes", "float", "int", "map", "number", "string",
+];
+
+const SHOOTER_HOST_APIS: &[&str] = &[
+    "bevy::Shooter::set_player_health",
+    "bevy::Shooter::set_player_attack",
+    "bevy::Shooter::set_player_projectiles",
+    "bevy::Shooter::spawn_enemy",
+    "bevy::Shooter::spawn_reward",
+    "bevy::Shooter::spawn_enemy_every",
+    "bevy::Shooter::spawn_reward_every",
+    "bevy::Shooter::spawn_enemy_after_kills",
+];
+
+fn rustscript_highlight_tokens(source: &str) -> Vec<ScriptToken> {
+    let mut tokens = Vec::new();
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+
+    while cursor < bytes.len() {
+        let ch = bytes[cursor] as char;
+        if ch.is_ascii_whitespace() {
+            cursor += 1;
+            continue;
+        }
+
+        if source[cursor..].starts_with("//") {
+            let end = source[cursor..]
+                .find('\n')
+                .map(|offset| cursor + offset)
+                .unwrap_or(source.len());
+            tokens.push(ScriptToken {
+                start: cursor,
+                end,
+                kind: ScriptTokenKind::Comment,
+            });
+            cursor = end;
+            continue;
+        }
+
+        if source[cursor..].starts_with("/*") {
+            let end = source[cursor + 2..]
+                .find("*/")
+                .map(|offset| cursor + 2 + offset + 2)
+                .unwrap_or(source.len());
+            tokens.push(ScriptToken {
+                start: cursor,
+                end,
+                kind: ScriptTokenKind::Comment,
+            });
+            cursor = end;
+            continue;
+        }
+
+        if ch == '"' || source[cursor..].starts_with("b\"") {
+            let start = cursor;
+            if source[cursor..].starts_with("b\"") {
+                cursor += 2;
+            } else {
+                cursor += 1;
+            }
+            let mut escaped = false;
+            while cursor < bytes.len() {
+                let current = bytes[cursor] as char;
+                cursor += 1;
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if current == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if current == '"' {
+                    break;
+                }
+            }
+            tokens.push(ScriptToken {
+                start,
+                end: cursor,
+                kind: ScriptTokenKind::String,
+            });
+            continue;
+        }
+
+        if ch.is_ascii_digit() {
+            let start = cursor;
+            cursor += 1;
+            while cursor < bytes.len() {
+                let current = bytes[cursor] as char;
+                if current.is_ascii_digit() || current == '.' {
+                    cursor += 1;
+                } else {
+                    break;
+                }
+            }
+            tokens.push(ScriptToken {
+                start,
+                end: cursor,
+                kind: ScriptTokenKind::Number,
+            });
+            continue;
+        }
+
+        if is_ident_start(ch) {
+            let start = cursor;
+            cursor += 1;
+            while cursor < bytes.len() {
+                let current = bytes[cursor] as char;
+                if is_ident_continue(current) {
+                    cursor += 1;
+                    continue;
+                }
+                if source[cursor..].starts_with("::") {
+                    cursor += 2;
+                    continue;
+                }
+                break;
+            }
+            let text = &source[start..cursor];
+            let kind = if SHOOTER_HOST_APIS.contains(&text) {
+                Some(ScriptTokenKind::HostApi)
+            } else if SCRIPT_KEYWORDS.contains(&text) {
+                Some(ScriptTokenKind::Keyword)
+            } else if SCRIPT_TYPES.contains(&text) {
+                Some(ScriptTokenKind::Type)
+            } else if next_non_ws_starts_with(source, cursor, '(') {
+                Some(ScriptTokenKind::Function)
+            } else {
+                None
+            };
+            if let Some(kind) = kind {
+                tokens.push(ScriptToken {
+                    start,
+                    end: cursor,
+                    kind,
+                });
+            }
+            continue;
+        }
+
+        if "=+-*/%<>!&|?:;,.(){}[]".contains(ch) {
+            tokens.push(ScriptToken {
+                start: cursor,
+                end: cursor + 1,
+                kind: ScriptTokenKind::Operator,
+            });
+        }
+        cursor += 1;
+    }
+
+    tokens
+}
+
+fn is_ident_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn next_non_ws_starts_with(source: &str, cursor: usize, needle: char) -> bool {
+    source[cursor..]
+        .chars()
+        .find(|ch| !ch.is_ascii_whitespace())
+        == Some(needle)
+}
+
+fn script_compile_diagnostics(source: &str, fallback_error: &str) -> Vec<ScriptDiagnostic> {
+    match compile_source(source) {
+        Ok(_) => {
+            if fallback_error.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![fallback_script_diagnostic(source, fallback_error)]
+            }
+        }
+        Err(SourceError::Parse(err)) => {
+            let mut source_map = SourceMap::new();
+            let source_id = source_map.add_source("<editor>", source.to_string());
+            let err = err.with_line_span_from_source(&source_map, source_id);
+            let line = preferred_parse_diagnostic_line(source, err.line.max(1), &err.message);
+            let span = if line == err.line {
+                err.span.or_else(|| source_map.line_span(source_id, line))
+            } else {
+                source_map.line_span(source_id, line)
+            };
+            vec![script_diagnostic_from_parts(
+                &source_map,
+                source_id,
+                line,
+                span.map(|span| (span.lo, span.hi)),
+                err.message,
+            )]
+        }
+        Err(SourceError::Compile(err)) => {
+            let mut source_map = SourceMap::new();
+            let source_id = source_map.add_source("<editor>", source.to_string());
+            let line = err.line().unwrap_or(1).max(1);
+            let span = source_map.line_span(source_id, line);
+            vec![script_diagnostic_from_parts(
+                &source_map,
+                source_id,
+                line,
+                span.map(|span| (span.lo, span.hi)),
+                err.diagnostic_message(),
+            )]
+        }
+    }
+}
+
+fn preferred_parse_diagnostic_line(source: &str, reported_line: usize, message: &str) -> usize {
+    if reported_line <= 1 || !message.contains("expected") {
+        return reported_line;
+    }
+
+    let Some(previous_line) = source.lines().nth(reported_line - 2) else {
+        return reported_line;
+    };
+    if previous_line.matches('(').count() > previous_line.matches(')').count() {
+        return reported_line - 1;
+    }
+    reported_line
+}
+
+fn script_diagnostic_from_parts(
+    source_map: &SourceMap,
+    source_id: u32,
+    line: usize,
+    span: Option<(usize, usize)>,
+    message: String,
+) -> ScriptDiagnostic {
+    let source_line = source_map
+        .file(source_id)
+        .and_then(|file| file.line_text(line))
+        .unwrap_or_default()
+        .to_string();
+    let (start_byte, end_byte) = span.unwrap_or_else(|| {
+        source_map
+            .line_span(source_id, line)
+            .map(|span| (span.lo, span.hi))
+            .unwrap_or((0, 0))
+    });
+    let (start_line, start_col) = source_map
+        .line_col_for_offset(source_id, start_byte)
+        .unwrap_or((line, 1));
+    let (_, end_col) = source_map
+        .line_col_for_offset(source_id, end_byte)
+        .unwrap_or((start_line, start_col + 1));
+    ScriptDiagnostic {
+        line: start_line,
+        start_col,
+        end_col: end_col.max(start_col + 1),
+        message,
+        source_line,
+        start_byte,
+        end_byte: end_byte.max(start_byte + 1),
+    }
+}
+
+fn fallback_script_diagnostic(source: &str, fallback_error: &str) -> ScriptDiagnostic {
+    let line = parse_line_number(fallback_error).unwrap_or(1);
+    let source_line = source
+        .lines()
+        .nth(line.saturating_sub(1))
+        .unwrap_or_default()
+        .to_string();
+    let start_byte = line_start_byte(source, line).unwrap_or(0);
+    let end_byte = start_byte + source_line.len();
+    ScriptDiagnostic {
+        line,
+        start_col: 1,
+        end_col: source_line.chars().count().max(1) + 1,
+        message: fallback_error.to_string(),
+        source_line,
+        start_byte,
+        end_byte: end_byte.max(start_byte + 1),
+    }
+}
+
+fn parse_line_number(text: &str) -> Option<usize> {
+    let marker = "line ";
+    let start = text.find(marker)? + marker.len();
+    let digits = text[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    digits.parse().ok()
+}
+
+fn line_start_byte(source: &str, line: usize) -> Option<usize> {
+    if line == 0 {
+        return None;
+    }
+    if line == 1 {
+        return Some(0);
+    }
+    let mut current_line = 1usize;
+    for (index, ch) in source.char_indices() {
+        if ch == '\n' {
+            current_line += 1;
+            if current_line == line {
+                return Some(index + 1);
+            }
+        }
+    }
+    None
+}
+
+fn rustscript_layout_job(source: &str, diagnostics: &[ScriptDiagnostic]) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let mut cursor = 0usize;
+    for token in rustscript_highlight_tokens(source) {
+        if cursor < token.start {
+            append_script_text(
+                &mut job,
+                &source[cursor..token.start],
+                plain_format(diagnostics),
+            );
+        }
+        append_script_text(
+            &mut job,
+            token.text(source),
+            token_format(token.kind, token.start, token.end, diagnostics),
+        );
+        cursor = token.end;
+    }
+    if cursor < source.len() {
+        append_script_text(&mut job, &source[cursor..], plain_format(diagnostics));
+    }
+    job
+}
+
+fn append_script_text(job: &mut egui::text::LayoutJob, text: &str, format: egui::TextFormat) {
+    job.append(text, 0.0, format);
+}
+
+fn token_format(
+    kind: ScriptTokenKind,
+    start: usize,
+    end: usize,
+    diagnostics: &[ScriptDiagnostic],
+) -> egui::TextFormat {
+    let mut format = plain_format(diagnostics);
+    format.color = match kind {
+        ScriptTokenKind::Keyword => egui::Color32::from_rgb(117, 190, 255),
+        ScriptTokenKind::Type => egui::Color32::from_rgb(106, 214, 179),
+        ScriptTokenKind::Number => egui::Color32::from_rgb(255, 206, 112),
+        ScriptTokenKind::String => egui::Color32::from_rgb(245, 155, 112),
+        ScriptTokenKind::Comment => egui::Color32::from_rgb(130, 148, 166),
+        ScriptTokenKind::Function => egui::Color32::from_rgb(209, 184, 255),
+        ScriptTokenKind::HostApi => egui::Color32::from_rgb(120, 230, 238),
+        ScriptTokenKind::Operator => egui::Color32::from_rgb(182, 192, 210),
+    };
+    if diagnostics
+        .iter()
+        .any(|diagnostic| ranges_overlap(start, end, diagnostic.start_byte, diagnostic.end_byte))
+    {
+        format.background = egui::Color32::from_rgba_unmultiplied(120, 24, 36, 115);
+    }
+    format
+}
+
+fn plain_format(diagnostics: &[ScriptDiagnostic]) -> egui::TextFormat {
+    let _ = diagnostics;
+    egui::TextFormat {
+        font_id: egui::FontId::monospace(13.0),
+        color: egui::Color32::from_rgb(220, 228, 238),
+        ..Default::default()
+    }
+}
+
+fn ranges_overlap(a_start: usize, a_end: usize, b_start: usize, b_end: usize) -> bool {
+    a_start < b_end && b_start < a_end
+}
+
+fn render_script_diagnostics(ui: &mut egui::Ui, diagnostics: &[ScriptDiagnostic]) {
+    if diagnostics.is_empty() {
+        return;
+    }
+
+    ui.add_space(6.0);
+    for diagnostic in diagnostics {
+        ui.colored_label(
+            egui::Color32::from_rgb(255, 120, 135),
+            format!(
+                "line {}:{} {}",
+                diagnostic.line, diagnostic.start_col, diagnostic.message
+            ),
+        );
+        ui.monospace(format!(
+            "{:>3} | {}",
+            diagnostic.line, diagnostic.source_line
+        ));
+        let pointer_width = diagnostic
+            .end_col
+            .saturating_sub(diagnostic.start_col)
+            .max(1);
+        ui.monospace(format!(
+            "    | {}{}",
+            " ".repeat(diagnostic.start_col.saturating_sub(1)),
+            "^".repeat(pointer_width)
+        ));
     }
 }
 
@@ -489,6 +941,7 @@ fn apply_pending_script(world: &mut World) {
     match result {
         Ok(summary) => {
             let verb = if restart { "Restarted" } else { "Applied live" };
+            editor.diagnostics.clear();
             editor.status = format!(
                 "{verb}: hp {}, attack {} / power {}, enemies {}",
                 summary.player_health,
@@ -498,7 +951,8 @@ fn apply_pending_script(world: &mut World) {
             );
         }
         Err(err) => {
-            editor.status = format!("RustScript error: {err}");
+            editor.diagnostics = script_compile_diagnostics(&source, &err);
+            editor.status = "RustScript has diagnostics below".to_string();
         }
     }
 }
@@ -1727,12 +2181,21 @@ fn script_panel(
             ));
             ui.label(&editor.status);
             ui.separator();
+            let diagnostics = editor.diagnostics.clone();
+            let mut layouter =
+                move |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+                    let mut job = rustscript_layout_job(text.as_str(), &diagnostics);
+                    job.wrap.max_width = wrap_width;
+                    ui.fonts_mut(|fonts| fonts.layout_job(job))
+                };
             ui.add(
                 egui::TextEdit::multiline(&mut editor.buffer)
                     .code_editor()
                     .desired_rows(26)
-                    .desired_width(f32::INFINITY),
+                    .desired_width(f32::INFINITY)
+                    .layouter(&mut layouter),
             );
+            render_script_diagnostics(ui, &editor.diagnostics);
             if ui.button("Save and apply now").clicked() {
                 editor.pending_save = true;
             }
@@ -1760,6 +2223,51 @@ mod tests {
             enemy_missile_frames: vec![image.clone(), image.clone()],
             shockwave_frames: vec![image],
         }
+    }
+
+    #[test]
+    fn rustscript_highlighter_marks_keywords_host_calls_and_literals() {
+        let source = r#"let hp: bool = bevy::Shooter::set_player_health(95);"#;
+        let tokens = rustscript_highlight_tokens(source);
+
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == ScriptTokenKind::Keyword && token.text(source) == "let")
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == ScriptTokenKind::Type && token.text(source) == "bool")
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == ScriptTokenKind::HostApi
+                    && token.text(source) == "bevy::Shooter::set_player_health")
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == ScriptTokenKind::Number && token.text(source) == "95")
+        );
+    }
+
+    #[test]
+    fn script_diagnostics_include_line_span_and_source_line() {
+        let source = "use bevy;\nlet hp: bool = bevy::Shooter::set_player_health(95\ntrue;\n";
+        let diagnostics = script_compile_diagnostics(source, "fallback error");
+
+        assert_eq!(diagnostics.len(), 1);
+        let diagnostic = &diagnostics[0];
+        assert_eq!(diagnostic.line, 2);
+        assert!(diagnostic.start_col >= 1);
+        assert!(diagnostic.end_col >= diagnostic.start_col);
+        assert_eq!(
+            diagnostic.source_line,
+            "let hp: bool = bevy::Shooter::set_player_health(95"
+        );
+        assert!(diagnostic.message.contains("expected"));
     }
 
     #[test]
@@ -2037,6 +2545,7 @@ true;
             .insert_resource(ScriptEditor {
                 buffer: live_source.to_string(),
                 status: String::new(),
+                diagnostics: Vec::new(),
                 pending_save: true,
                 pending_restart: false,
             });
