@@ -2,7 +2,7 @@ use bevy_ecs::prelude::*;
 use pretty_assertions::assert_eq;
 use rustscript_bevy_gameplay::{
     AttackPower, AttackStyle, Enemy, Health, Player, PlayerProjectileLoadout, Position, RewardItem,
-    apply_shooter_script,
+    ShooterSpawnRules, apply_shooter_script, tick_shooter_spawn_rules,
 };
 
 #[test]
@@ -131,4 +131,58 @@ true;
 
     assert_eq!(summary.player_projectile_kind, "laser");
     assert_eq!(summary.player_projectile_count, 5);
+}
+
+#[test]
+fn script_can_register_timed_and_kill_spawn_rules() {
+    let mut world = World::new();
+    let source = r#"
+use bevy;
+let hp: bool = bevy::Shooter::set_player_health(95);
+let timed_enemy: bool = bevy::Shooter::spawn_enemy_every("scout", 18, "straight", -120, 520, 2000);
+let timed_reward: bool = bevy::Shooter::spawn_reward_every("health", 20, 120, -260, 3000);
+let boss: bool = bevy::Shooter::spawn_enemy_after_kills("boss", 120, "burst", 0, 540, 3);
+true;
+"#;
+
+    let summary = apply_shooter_script(&mut world, source).expect("script should apply");
+
+    assert_eq!(summary.enemies_spawned, 0);
+    assert_eq!(summary.rewards_spawned, 0);
+    let rules = world
+        .get_resource::<ShooterSpawnRules>()
+        .expect("script should install spawn rules");
+    assert_eq!(rules.enemies.len(), 2);
+    assert_eq!(rules.rewards.len(), 1);
+}
+
+#[test]
+fn spawn_rules_tick_on_intervals_and_kill_counts() {
+    let mut world = World::new();
+    let source = r#"
+use bevy;
+let hp: bool = bevy::Shooter::set_player_health(95);
+let timed_enemy: bool = bevy::Shooter::spawn_enemy_every("scout", 18, "straight", -120, 520, 2000);
+let timed_reward: bool = bevy::Shooter::spawn_reward_every("bullets", 1, 120, -260, 3000);
+let boss: bool = bevy::Shooter::spawn_enemy_after_kills("boss", 120, "burst", 0, 540, 3);
+true;
+"#;
+    apply_shooter_script(&mut world, source).expect("script should apply");
+
+    let first = tick_shooter_spawn_rules(&mut world, 1999, 2);
+    assert_eq!(first.enemies_spawned, 0);
+    assert_eq!(first.rewards_spawned, 0);
+
+    let second = tick_shooter_spawn_rules(&mut world, 1, 1);
+    assert_eq!(second.enemies_spawned, 2);
+    assert_eq!(second.rewards_spawned, 0);
+
+    let third = tick_shooter_spawn_rules(&mut world, 1000, 0);
+    assert_eq!(third.enemies_spawned, 0);
+    assert_eq!(third.rewards_spawned, 1);
+
+    let enemies = world.query::<&Enemy>().iter(&world).collect::<Vec<_>>();
+    assert_eq!(enemies.len(), 2);
+    assert!(enemies.iter().any(|enemy| enemy.kind == "boss"));
+    assert!(enemies.iter().any(|enemy| enemy.kind == "scout"));
 }

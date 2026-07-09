@@ -17,6 +17,10 @@ A game can keep Bevy ECS systems and rendering compiled while moving gameplay tu
   - `bevy::Shooter::set_player_health`
   - `bevy::Shooter::set_player_attack`
   - `bevy::Shooter::spawn_enemy`
+  - `bevy::Shooter::spawn_reward`
+  - `bevy::Shooter::spawn_enemy_every`
+  - `bevy::Shooter::spawn_reward_every`
+  - `bevy::Shooter::spawn_enemy_after_kills`
 - host functions are exported with `#[pd_host_function(name = "...")]`; the `.rss` names and namespaces match the bound host names exactly
 
 This uses upstream Bevy crates plus local `pd-vm` / `pd-host-function` paths.
@@ -29,7 +33,7 @@ cargo run --example combat
 cargo run --example shooter
 ```
 
-`cargo run --example shooter` opens a simple side-scrolling flight shooter. The right-side panel contains the currently active RustScript. Change player health, attack style/power/cooldown, or the enemy wave, then click **Save and apply now**; the existing game world updates in place.
+`cargo run --example shooter` opens a simple side-scrolling flight shooter. The right-side panel contains the currently active RustScript. Change player health, attack style/power/cooldown, enemy waves, timed reinforcements, reward drops, or kill-gated boss waves, then click **Save and apply now**; the existing game world updates in place.
 
 For headless CI smoke:
 

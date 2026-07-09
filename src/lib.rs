@@ -69,6 +69,50 @@ pub struct ShooterSummary {
     pub rewards_spawned: usize,
 }
 
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShooterSpawnRules {
+    pub enemies: Vec<ShooterEnemySpawnRule>,
+    pub rewards: Vec<ShooterRewardSpawnRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShooterEnemySpawnRule {
+    pub kind: String,
+    pub health: i64,
+    pub attack_style: String,
+    pub x: i64,
+    pub y: i64,
+    pub trigger: ShooterSpawnTrigger,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShooterRewardSpawnRule {
+    pub kind: String,
+    pub amount: i64,
+    pub x: i64,
+    pub y: i64,
+    pub trigger: ShooterSpawnTrigger,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShooterSpawnTrigger {
+    EveryMs {
+        interval_ms: i64,
+        elapsed_ms: i64,
+    },
+    AfterKills {
+        kill_count: i64,
+        kills_seen: i64,
+        fired: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShooterRuleTickSummary {
+    pub enemies_spawned: usize,
+    pub rewards_spawned: usize,
+}
+
 #[derive(Resource, Debug, Clone)]
 pub struct DamageRules {
     source: String,
@@ -103,8 +147,89 @@ pub fn apply_shooter_script(world: &mut World, source: &str) -> Result<ShooterSu
     compile_source(source).map_err(|err| err.to_string())?;
     clear_script_managed_entities::<ScriptManagedEnemy>(world);
     clear_script_managed_entities::<ScriptManagedReward>(world);
+    world.insert_resource(ShooterSpawnRules::default());
     with_shooter_context(world, || run_shooter_value(source))?;
     summarize_shooter_world(world)
+}
+
+pub fn tick_shooter_spawn_rules(
+    world: &mut World,
+    delta_ms: i64,
+    kills_delta: i64,
+) -> ShooterRuleTickSummary {
+    let mut enemy_spawns = Vec::new();
+    let mut reward_spawns = Vec::new();
+    let delta_ms = delta_ms.max(0);
+    let kills_delta = kills_delta.max(0);
+
+    if let Some(mut rules) = world.get_resource_mut::<ShooterSpawnRules>() {
+        for rule in &mut rules.enemies {
+            let spawn_count = rule.trigger.consume_spawns(delta_ms, kills_delta);
+            for _ in 0..spawn_count {
+                enemy_spawns.push(rule.clone());
+            }
+        }
+        for rule in &mut rules.rewards {
+            let spawn_count = rule.trigger.consume_spawns(delta_ms, kills_delta);
+            for _ in 0..spawn_count {
+                reward_spawns.push(rule.clone());
+            }
+        }
+    }
+
+    for rule in &enemy_spawns {
+        spawn_enemy_entity(
+            world,
+            &rule.kind,
+            rule.health,
+            &rule.attack_style,
+            rule.x,
+            rule.y,
+        );
+    }
+    for rule in &reward_spawns {
+        spawn_reward_entity(world, &rule.kind, rule.amount, rule.x, rule.y);
+    }
+
+    ShooterRuleTickSummary {
+        enemies_spawned: enemy_spawns.len(),
+        rewards_spawned: reward_spawns.len(),
+    }
+}
+
+impl ShooterSpawnTrigger {
+    fn consume_spawns(&mut self, delta_ms: i64, kills_delta: i64) -> usize {
+        match self {
+            Self::EveryMs {
+                interval_ms,
+                elapsed_ms,
+            } => {
+                let interval = (*interval_ms).max(1);
+                *elapsed_ms += delta_ms;
+                let spawn_count = (*elapsed_ms / interval).max(0) as usize;
+                if spawn_count > 0 {
+                    *elapsed_ms %= interval;
+                }
+                spawn_count
+            }
+            Self::AfterKills {
+                kill_count,
+                kills_seen,
+                fired,
+            } => {
+                if *fired {
+                    return 0;
+                }
+                *kills_seen += kills_delta;
+                if *kills_seen >= (*kill_count).max(1) {
+                    *fired = true;
+                    1
+                } else {
+                    0
+                }
+            }
+        }
+    }
 }
 
 fn clear_script_managed_entities<T: Component>(world: &mut World) {
@@ -179,6 +304,60 @@ fn ensure_player(world: &mut World) -> Entity {
             Velocity { x: 0.0, y: 0.0 },
         ))
         .id()
+}
+
+fn spawn_enemy_entity(
+    world: &mut World,
+    kind: &str,
+    health: i64,
+    attack_style: &str,
+    x: i64,
+    y: i64,
+) -> Entity {
+    world
+        .spawn((
+            Enemy {
+                kind: kind.to_string(),
+            },
+            Health(health),
+            AttackStyle(attack_style.to_string()),
+            AttackPower((health / 14).max(2)),
+            AttackCooldownMs(1400),
+            Position {
+                x: x as f32,
+                y: y as f32,
+            },
+            Velocity { x: 0.0, y: -50.0 },
+            ScriptManagedEnemy,
+        ))
+        .id()
+}
+
+fn spawn_reward_entity(world: &mut World, kind: &str, amount: i64, x: i64, y: i64) -> Entity {
+    world
+        .spawn((
+            RewardItem {
+                kind: kind.to_string(),
+                amount,
+            },
+            Position {
+                x: x as f32,
+                y: y as f32,
+            },
+            ScriptManagedReward,
+        ))
+        .id()
+}
+
+fn clamp_spawn_interval_ms(value: i64) -> i64 {
+    value.clamp(250, 120_000)
+}
+
+fn ensure_spawn_rules(world: &mut World) -> Mut<'_, ShooterSpawnRules> {
+    if !world.contains_resource::<ShooterSpawnRules>() {
+        world.insert_resource(ShooterSpawnRules::default());
+    }
+    world.resource_mut::<ShooterSpawnRules>()
 }
 
 fn evaluate_damage(
@@ -335,6 +514,18 @@ fn bind_shooter_hosts(vm: &mut Vm) {
     vm.bind_static_args_function(
         "bevy::Shooter::spawn_reward",
         host::bevy::shooter_spawn_reward_host,
+    );
+    vm.bind_static_args_function(
+        "bevy::Shooter::spawn_enemy_every",
+        host::bevy::shooter_spawn_enemy_every_host,
+    );
+    vm.bind_static_args_function(
+        "bevy::Shooter::spawn_reward_every",
+        host::bevy::shooter_spawn_reward_every_host,
+    );
+    vm.bind_static_args_function(
+        "bevy::Shooter::spawn_enemy_after_kills",
+        host::bevy::shooter_spawn_enemy_after_kills_host,
     );
 }
 
@@ -538,21 +729,7 @@ mod host {
             y: i64,
         ) -> VmResult<bool> {
             with_shooter_world(|world| {
-                world.spawn((
-                    Enemy {
-                        kind: kind.to_string(),
-                    },
-                    Health(health),
-                    AttackStyle(attack_style.to_string()),
-                    AttackPower((health / 14).max(2)),
-                    AttackCooldownMs(1400),
-                    Position {
-                        x: x as f32,
-                        y: y as f32,
-                    },
-                    Velocity { x: 0.0, y: -50.0 },
-                    ScriptManagedEnemy,
-                ));
+                spawn_enemy_entity(world, kind, health, attack_style, x, y);
                 Ok(true)
             })
         }
@@ -570,23 +747,110 @@ mod host {
             y: i64,
         ) -> VmResult<bool> {
             with_shooter_world(|world| {
-                world.spawn((
-                    RewardItem {
-                        kind: kind.to_string(),
-                        amount,
-                    },
-                    Position {
-                        x: x as f32,
-                        y: y as f32,
-                    },
-                    ScriptManagedReward,
-                ));
+                spawn_reward_entity(world, kind, amount, x, y);
                 Ok(true)
             })
         }
 
         pub(crate) fn shooter_spawn_reward_host(args: &[Value]) -> VmResult<CallOutcome> {
             return_one(shooter_spawn_reward(args))
+        }
+
+        /// Registers a repeated enemy spawn rule from RustScript.
+        #[pd_host_function(name = "bevy::Shooter::spawn_enemy_every")]
+        pub(crate) fn shooter_spawn_enemy_every_impl(
+            kind: &str,
+            health: i64,
+            attack_style: &str,
+            x: i64,
+            y: i64,
+            interval_ms: i64,
+        ) -> VmResult<bool> {
+            with_shooter_world(|world| {
+                ensure_spawn_rules(world)
+                    .enemies
+                    .push(ShooterEnemySpawnRule {
+                        kind: kind.to_string(),
+                        health,
+                        attack_style: attack_style.to_string(),
+                        x,
+                        y,
+                        trigger: ShooterSpawnTrigger::EveryMs {
+                            interval_ms: clamp_spawn_interval_ms(interval_ms),
+                            elapsed_ms: 0,
+                        },
+                    });
+                Ok(true)
+            })
+        }
+
+        pub(crate) fn shooter_spawn_enemy_every_host(args: &[Value]) -> VmResult<CallOutcome> {
+            return_one(shooter_spawn_enemy_every(args))
+        }
+
+        /// Registers a repeated reward spawn rule from RustScript.
+        #[pd_host_function(name = "bevy::Shooter::spawn_reward_every")]
+        pub(crate) fn shooter_spawn_reward_every_impl(
+            kind: &str,
+            amount: i64,
+            x: i64,
+            y: i64,
+            interval_ms: i64,
+        ) -> VmResult<bool> {
+            with_shooter_world(|world| {
+                ensure_spawn_rules(world)
+                    .rewards
+                    .push(ShooterRewardSpawnRule {
+                        kind: kind.to_string(),
+                        amount,
+                        x,
+                        y,
+                        trigger: ShooterSpawnTrigger::EveryMs {
+                            interval_ms: clamp_spawn_interval_ms(interval_ms),
+                            elapsed_ms: 0,
+                        },
+                    });
+                Ok(true)
+            })
+        }
+
+        pub(crate) fn shooter_spawn_reward_every_host(args: &[Value]) -> VmResult<CallOutcome> {
+            return_one(shooter_spawn_reward_every(args))
+        }
+
+        /// Registers a one-shot enemy spawn rule gated by kills since script apply.
+        #[pd_host_function(name = "bevy::Shooter::spawn_enemy_after_kills")]
+        pub(crate) fn shooter_spawn_enemy_after_kills_impl(
+            kind: &str,
+            health: i64,
+            attack_style: &str,
+            x: i64,
+            y: i64,
+            kill_count: i64,
+        ) -> VmResult<bool> {
+            with_shooter_world(|world| {
+                ensure_spawn_rules(world)
+                    .enemies
+                    .push(ShooterEnemySpawnRule {
+                        kind: kind.to_string(),
+                        health,
+                        attack_style: attack_style.to_string(),
+                        x,
+                        y,
+                        trigger: ShooterSpawnTrigger::AfterKills {
+                            kill_count: kill_count.max(1),
+                            kills_seen: 0,
+                            fired: false,
+                        },
+                    });
+                Ok(true)
+            })
+        }
+
+        pub(crate) fn shooter_spawn_enemy_after_kills_host(
+            args: &[Value],
+        ) -> VmResult<CallOutcome> {
+            return_one(shooter_spawn_enemy_after_kills(args))
         }
     }
 }

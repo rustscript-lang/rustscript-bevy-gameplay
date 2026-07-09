@@ -8,7 +8,8 @@ use bevy_egui::{
 };
 use rustscript_bevy_gameplay::{
     AttackCooldownMs, AttackPower, AttackStyle, Enemy, Health, Player, PlayerProjectileLoadout,
-    Position, RewardItem, ScriptManagedEnemy, Velocity, apply_shooter_script,
+    Position, RewardItem, ScriptManagedEnemy, ShooterSpawnRules, Velocity, apply_shooter_script,
+    tick_shooter_spawn_rules,
 };
 use std::f32::consts::FRAC_PI_2;
 
@@ -83,6 +84,7 @@ fn main() {
         .add_plugins(EguiPlugin::default())
         .insert_resource(ClearColor(Color::srgb(0.055, 0.085, 0.14)))
         .insert_resource(Score(0))
+        .insert_resource(SpawnRuleProgress::default())
         .insert_resource(GameFlow::Running)
         .insert_resource(ScriptEditor {
             buffer: SCRIPT.to_string(),
@@ -109,6 +111,7 @@ fn main() {
                 animate_sprites,
                 animate_visual_motion,
                 collisions,
+                run_scripted_spawn_rules,
                 update_game_flow_after_health,
                 collect_rewards,
                 despawn_out_of_bounds,
@@ -121,15 +124,21 @@ fn main() {
 fn run_script_smoke() {
     let mut world = bevy_ecs::prelude::World::new();
     let summary = apply_shooter_script(&mut world, SCRIPT).expect("shooter script should apply");
+    let (enemy_rules, reward_rules) = world
+        .get_resource::<ShooterSpawnRules>()
+        .map(|rules| (rules.enemies.len(), rules.rewards.len()))
+        .unwrap_or((0, 0));
     println!(
-        "player_hp={}, attack={}:{}, projectiles={}:{}, enemies={}, rewards={}",
+        "player_hp={}, attack={}:{}, projectiles={}:{}, enemies={}, rewards={}, enemy_rules={}, reward_rules={}",
         summary.player_health,
         summary.player_attack_style,
         summary.player_attack_power,
         summary.player_projectile_kind,
         summary.player_projectile_count,
         summary.enemies_spawned,
-        summary.rewards_spawned
+        summary.rewards_spawned,
+        enemy_rules,
+        reward_rules
     );
 }
 
@@ -143,6 +152,11 @@ struct ScriptEditor {
 
 #[derive(Resource, Deref, DerefMut)]
 struct Score(u32);
+
+#[derive(Resource, Default)]
+struct SpawnRuleProgress {
+    last_score: u32,
+}
 
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
 enum GameFlow {
@@ -465,6 +479,9 @@ fn apply_pending_script(world: &mut World) {
     } else {
         apply_shooter_script(world, &source)
     };
+    if result.is_ok() {
+        reset_spawn_rule_progress(world);
+    }
     let mut editor = world.resource_mut::<ScriptEditor>();
     match result {
         Ok(summary) => {
@@ -504,6 +521,18 @@ fn restart_gameplay(
     }
 
     apply_shooter_script(world, source)
+}
+
+fn reset_spawn_rule_progress(world: &mut World) {
+    let score = world
+        .get_resource::<Score>()
+        .map(|score| score.0)
+        .unwrap_or(0);
+    if let Some(mut progress) = world.get_resource_mut::<SpawnRuleProgress>() {
+        progress.last_score = score;
+    } else {
+        world.insert_resource(SpawnRuleProgress { last_score: score });
+    }
 }
 
 fn despawn_entities_with<T: Component>(world: &mut World) {
@@ -1306,6 +1335,33 @@ fn collisions(
     }
 }
 
+fn run_scripted_spawn_rules(world: &mut World) {
+    let is_running = world
+        .get_resource::<GameFlow>()
+        .map(|flow| flow.is_running())
+        .unwrap_or(true);
+    if !is_running {
+        return;
+    }
+
+    let delta_ms = world
+        .get_resource::<Time>()
+        .map(|time| (time.delta_secs() * 1000.0).round() as i64)
+        .unwrap_or(0);
+    let score = world
+        .get_resource::<Score>()
+        .map(|score| score.0)
+        .unwrap_or(0);
+    let kills_delta = {
+        let mut progress = world.resource_mut::<SpawnRuleProgress>();
+        let kills_delta = score.saturating_sub(progress.last_score);
+        progress.last_score = score;
+        kills_delta
+    };
+
+    tick_shooter_spawn_rules(world, delta_ms, kills_delta as i64);
+}
+
 fn update_game_flow_after_health(
     mut flow: ResMut<GameFlow>,
     players: Query<&Health, With<Player>>,
@@ -1528,6 +1584,7 @@ fn script_panel(
 mod tests {
     use super::*;
     use bevy::ecs::schedule::ScheduleLabel;
+    use rustscript_bevy_gameplay::{ShooterEnemySpawnRule, ShooterSpawnTrigger};
 
     #[test]
     fn collisions_system_accepts_disjoint_player_and_enemy_health_queries() {
@@ -1616,6 +1673,41 @@ mod tests {
             .single(app.world())
             .expect("enemy should remain");
         assert_eq!(*position, Position { x: 10.0, y: 200.0 });
+    }
+
+    #[test]
+    fn scripted_spawn_rules_use_score_delta() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(GameFlow::Running)
+            .insert_resource(Score(2))
+            .insert_resource(SpawnRuleProgress { last_score: 0 })
+            .insert_resource(ShooterSpawnRules {
+                enemies: vec![ShooterEnemySpawnRule {
+                    kind: "boss".to_string(),
+                    health: 120,
+                    attack_style: "burst".to_string(),
+                    x: 0,
+                    y: 540,
+                    trigger: ShooterSpawnTrigger::AfterKills {
+                        kill_count: 2,
+                        kills_seen: 0,
+                        fired: false,
+                    },
+                }],
+                rewards: vec![],
+            })
+            .add_systems(Update, run_scripted_spawn_rules);
+
+        app.update();
+
+        let enemies = app
+            .world_mut()
+            .query::<&Enemy>()
+            .iter(app.world())
+            .collect::<Vec<_>>();
+        assert_eq!(enemies.len(), 1);
+        assert_eq!(enemies[0].kind, "boss");
     }
 
     #[test]

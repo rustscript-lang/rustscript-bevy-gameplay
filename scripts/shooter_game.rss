@@ -12,4 +12,11 @@ let tank: bool = bevy::Shooter::spawn_enemy("tank", 65, "straight", 210, 470);
 let bullets: bool = bevy::Shooter::spawn_reward("bullets", 1, -120, -220);
 let health: bool = bevy::Shooter::spawn_reward("health", 20, 130, -280);
 
+let reinforcements: bool =
+    bevy::Shooter::spawn_enemy_every("scout", 16, "straight", -210, 530, 7000);
+let supply_drop: bool =
+    bevy::Shooter::spawn_reward_every("bullets", 1, 0, -260, 12000);
+let boss_wave: bool =
+    bevy::Shooter::spawn_enemy_after_kills("boss", 120, "burst", 0, 540, 4);
+
 true;
