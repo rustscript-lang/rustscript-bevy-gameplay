@@ -1,0 +1,356 @@
+use bevy;
+
+let width: int = bevy::Xiangqi::board_width();
+let height: int = bevy::Xiangqi::board_height();
+let mut best_from_x: int = -1;
+let mut best_from_y: int = -1;
+let mut best_to_x: int = -1;
+let mut best_to_y: int = -1;
+let mut best_score: int = -1000000;
+
+let mut from_y_scan: int = 0;
+while from_y_scan < height {
+    let mut from_x_scan: int = 0;
+    while from_x_scan < width {
+        let piece: int = bevy::Xiangqi::cell(from_x_scan, from_y_scan);
+        let own_piece: bool = piece * ai_player > 0;
+        let mut abs_piece: int = piece;
+        let abs_piece_step: bool = if abs_piece < 0 => {
+            abs_piece = 0 - abs_piece;
+            true
+        } else => {
+            false
+        };
+
+        let mut to_y_scan: int = 0;
+        while own_piece && to_y_scan < height {
+            let mut to_x_scan: int = 0;
+            while to_x_scan < width {
+                let target: int = bevy::Xiangqi::cell(to_x_scan, to_y_scan);
+                let target_ok: bool = target == 0 || target * ai_player < 0;
+                let dx_raw: int = to_x_scan - from_x_scan;
+                let dy_raw: int = to_y_scan - from_y_scan;
+                let mut abs_dx: int = dx_raw;
+                let abs_dx_step: bool = if abs_dx < 0 => {
+                    abs_dx = 0 - abs_dx;
+                    true
+                } else => {
+                    false
+                };
+                let mut abs_dy: int = dy_raw;
+                let abs_dy_step: bool = if abs_dy < 0 => {
+                    abs_dy = 0 - abs_dy;
+                    true
+                } else => {
+                    false
+                };
+
+                let same_file: bool = from_x_scan == to_x_scan;
+                let same_rank: bool = from_y_scan == to_y_scan;
+                let mut step_x: int = 0;
+                let step_x_setup: bool = if to_x_scan > from_x_scan => {
+                    step_x = 1;
+                    true
+                } else => {
+                    if to_x_scan < from_x_scan => {
+                        step_x = -1;
+                        true
+                    } else => {
+                        false
+                    }
+                };
+                let mut step_y: int = 0;
+                let step_y_setup: bool = if to_y_scan > from_y_scan => {
+                    step_y = 1;
+                    true
+                } else => {
+                    if to_y_scan < from_y_scan => {
+                        step_y = -1;
+                        true
+                    } else => {
+                        false
+                    }
+                };
+                let mut screens: int = 0;
+                let mut scan_x: int = from_x_scan + step_x;
+                let mut scan_y: int = from_y_scan + step_y;
+                while (same_file || same_rank) && (scan_x != to_x_scan || scan_y != to_y_scan) {
+                    let add_screen: bool = if bevy::Xiangqi::cell(scan_x, scan_y) != 0 => {
+                        screens = screens + 1;
+                        true
+                    } else => {
+                        false
+                    };
+                    scan_x = scan_x + step_x;
+                    scan_y = scan_y + step_y;
+                }
+
+                let mut valid_shape: bool = false;
+                let general_rule: bool = if abs_piece == 1 => {
+                    valid_shape = false;
+                    true
+                } else => {
+                    false
+                };
+                let advisor_rule: bool = if abs_piece == 2 => {
+                    valid_shape = false;
+                    true
+                } else => {
+                    false
+                };
+                let elephant_rule: bool = if abs_piece == 3 => {
+                    valid_shape = false;
+                    true
+                } else => {
+                    false
+                };
+                let horse_rule: bool = if abs_piece == 4 => {
+                    let mut leg_x: int = from_x_scan;
+                    let mut leg_y: int = from_y_scan;
+                    let leg_file: bool = if abs_dx == 2 => {
+                        leg_x = from_x_scan + dx_raw / 2;
+                        true
+                    } else => {
+                        false
+                    };
+                    let leg_rank: bool = if abs_dy == 2 => {
+                        leg_y = from_y_scan + dy_raw / 2;
+                        true
+                    } else => {
+                        false
+                    };
+                    valid_shape = ((abs_dx == 2 && abs_dy == 1) || (abs_dx == 1 && abs_dy == 2))
+                        && bevy::Xiangqi::cell(leg_x, leg_y) == 0;
+                    true
+                } else => {
+                    false
+                };
+                let chariot_rule: bool = if abs_piece == 5 => {
+                    valid_shape = (same_file || same_rank) && screens == 0 && (abs_dx + abs_dy) > 0;
+                    true
+                } else => {
+                    false
+                };
+                let cannon_rule: bool = if abs_piece == 6 => {
+                    let line: bool = same_file || same_rank;
+                    let quiet_move: bool = target == 0 && screens == 0;
+                    let capture_move: bool = target * ai_player < 0 && screens == 1;
+                    valid_shape = line && (quiet_move || capture_move) && (abs_dx + abs_dy) > 0;
+                    true
+                } else => {
+                    false
+                };
+                let soldier_rule: bool = if abs_piece == 7 => {
+                    let red_forward: bool = dy_raw == -1;
+                    let black_forward: bool = dy_raw == 1;
+                    let same_file_step: bool = dx_raw == 0;
+                    let same_rank_step: bool = dy_raw == 0;
+                    let side_step: bool = abs_dx == 1;
+                    let red_crossed: bool = from_y_scan <= 4;
+                    let black_crossed: bool = from_y_scan >= 5;
+                    let red_rule: bool = if ai_player == 1 => {
+                        let red_straight: bool = if same_file_step => {
+                            let red_forward_mark: bool = if red_forward => {
+                                valid_shape = true;
+                                true
+                            } else => {
+                                false
+                            };
+                            true
+                        } else => {
+                            false
+                        };
+                        let red_side: bool = if red_crossed => {
+                            let red_side_file: bool = if side_step => {
+                                let red_side_rank: bool = if same_rank_step => {
+                                    valid_shape = true;
+                                    true
+                                } else => {
+                                    false
+                                };
+                                true
+                            } else => {
+                                false
+                            };
+                            true
+                        } else => {
+                            false
+                        };
+                        true
+                    } else => {
+                        false
+                    };
+                    let black_rule: bool = if ai_player == -1 => {
+                        let black_straight: bool = if same_file_step => {
+                            let black_forward_mark: bool = if black_forward => {
+                                valid_shape = true;
+                                true
+                            } else => {
+                                false
+                            };
+                            true
+                        } else => {
+                            false
+                        };
+                        let black_side: bool = if black_crossed => {
+                            let black_side_file: bool = if side_step => {
+                                let black_side_rank: bool = if same_rank_step => {
+                                    valid_shape = true;
+                                    true
+                                } else => {
+                                    false
+                                };
+                                true
+                            } else => {
+                                false
+                            };
+                            true
+                        } else => {
+                            false
+                        };
+                        true
+                    } else => {
+                        false
+                    };
+                    true
+                } else => {
+                    false
+                };
+
+                let source_destination_ok: bool = own_piece && target_ok;
+                let mut legal: bool = source_destination_ok && valid_shape;
+                let trial: bool = if legal => {
+                    let cleared: bool = bevy::Xiangqi::set_cell(from_x_scan, from_y_scan, 0);
+                    let written: bool = bevy::Xiangqi::set_cell(to_x_scan, to_y_scan, piece);
+                    true
+                } else => {
+                    false
+                };
+
+                let mut red_general_x: int = -1;
+                let mut red_general_y: int = -1;
+                let mut black_general_x: int = -1;
+                let mut black_general_y: int = -1;
+                let mut board_y: int = 0;
+                while legal && board_y < height {
+                    let mut board_x: int = 0;
+                    while board_x < width {
+                        let cell: int = bevy::Xiangqi::cell(board_x, board_y);
+                        let red_mark: bool = if cell == 1 => {
+                            red_general_x = board_x;
+                            red_general_y = board_y;
+                            true
+                        } else => {
+                            false
+                        };
+                        let black_mark: bool = if cell == -1 => {
+                            black_general_x = board_x;
+                            black_general_y = board_y;
+                            true
+                        } else => {
+                            false
+                        };
+                        board_x = board_x + 1;
+                    }
+                    board_y = board_y + 1;
+                }
+                let mut face_blockers: int = 0;
+                let mut face_scan_y: int = black_general_y + 1;
+                while legal && red_general_x >= 0 && black_general_x >= 0
+                    && red_general_x == black_general_x && face_scan_y < red_general_y {
+                    let face_count: bool = if bevy::Xiangqi::cell(red_general_x, face_scan_y) != 0 => {
+                        face_blockers = face_blockers + 1;
+                        true
+                    } else => {
+                        false
+                    };
+                    face_scan_y = face_scan_y + 1;
+                }
+                let face_illegal: bool = legal && red_general_x >= 0 && black_general_x >= 0
+                    && red_general_x == black_general_x && face_blockers == 0;
+                let reject_face: bool = if face_illegal => {
+                    legal = false;
+                    true
+                } else => {
+                    false
+                };
+                let undo: bool = if trial => {
+                    let restore_from: bool = bevy::Xiangqi::set_cell(from_x_scan, from_y_scan, piece);
+                    let restore_to: bool = bevy::Xiangqi::set_cell(to_x_scan, to_y_scan, target);
+                    true
+                } else => {
+                    false
+                };
+
+                let scored: bool = if legal => {
+                    let mut target_abs: int = target;
+                    let target_abs_step: bool = if target_abs < 0 => {
+                        target_abs = 0 - target_abs;
+                        true
+                    } else => {
+                        false
+                    };
+                    let value: int = if target_abs == 1 => {
+                        100000
+                    } else => {
+                        if target_abs == 5 => {
+                            900
+                        } else => {
+                            if target_abs == 6 || target_abs == 4 => {
+                                450
+                            } else => {
+                                if target_abs == 3 || target_abs == 2 => {
+                                    220
+                                } else => {
+                                    if target_abs == 7 => {
+                                        120
+                                    } else => {
+                                        0
+                                    }
+                                }
+                            }
+                        }
+                    };
+                    let mut center_dx: int = to_x_scan - 4;
+                    let center_dx_step: bool = if center_dx < 0 => {
+                        center_dx = 0 - center_dx;
+                        true
+                    } else => {
+                        false
+                    };
+                    let advance: int = if ai_player == -1 => { to_y_scan } else => { 9 - to_y_scan };
+                    let score: int = value + advance * 8 + (4 - center_dx) * 3 + abs_piece;
+                    let selected: bool = if score > best_score => {
+                        best_score = score;
+                        best_from_x = from_x_scan;
+                        best_from_y = from_y_scan;
+                        best_to_x = to_x_scan;
+                        best_to_y = to_y_scan;
+                        true
+                    } else => {
+                        false
+                    };
+                    true
+                } else => {
+                    false
+                };
+                to_x_scan = to_x_scan + 1;
+            }
+            to_y_scan = to_y_scan + 1;
+        }
+        from_x_scan = from_x_scan + 1;
+    }
+    from_y_scan = from_y_scan + 1;
+}
+
+let fallback: bool = if best_from_x < 0 => {
+    best_from_x = 4;
+    best_from_y = if ai_player == 1 => { 9 } else => { 0 };
+    best_to_x = 4;
+    best_to_y = if ai_player == 1 => { 8 } else => { 1 };
+    true
+} else => {
+    false
+};
+let published: bool = bevy::Xiangqi::set_ai_move(best_from_x, best_from_y, best_to_x, best_to_y);
+best_score;

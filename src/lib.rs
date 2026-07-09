@@ -200,6 +200,107 @@ pub struct GomokuScriptTelemetry {
     pub elapsed_micros: u128,
 }
 
+pub const XIANGQI_BOARD_WIDTH: i64 = 9;
+pub const XIANGQI_BOARD_HEIGHT: i64 = 10;
+
+#[derive(Resource, Debug, Clone, PartialEq, Eq)]
+pub struct XiangqiBoard {
+    cells: Vec<i64>,
+}
+
+impl Default for XiangqiBoard {
+    fn default() -> Self {
+        let mut board = Self {
+            cells: vec![0; (XIANGQI_BOARD_WIDTH * XIANGQI_BOARD_HEIGHT) as usize],
+        };
+        board.reset();
+        board
+    }
+}
+
+impl XiangqiBoard {
+    pub fn cell(&self, x: i64, y: i64) -> i64 {
+        self.index(x, y)
+            .and_then(|index| self.cells.get(index).copied())
+            .unwrap_or(99)
+    }
+
+    pub fn cells(&self) -> &[i64] {
+        &self.cells
+    }
+
+    pub fn clear_for_test(&mut self) {
+        self.cells.fill(0);
+    }
+
+    pub fn set_for_test(&mut self, x: i64, y: i64, piece: i64) {
+        self.set_raw(x, y, piece);
+    }
+
+    fn reset(&mut self) {
+        self.cells.fill(0);
+        let black_back = [-5, -4, -3, -2, -1, -2, -3, -4, -5];
+        let red_back = [5, 4, 3, 2, 1, 2, 3, 4, 5];
+        for x in 0..XIANGQI_BOARD_WIDTH {
+            self.set_raw(x, 0, black_back[x as usize]);
+            self.set_raw(x, 9, red_back[x as usize]);
+        }
+        self.set_raw(1, 2, -6);
+        self.set_raw(7, 2, -6);
+        self.set_raw(1, 7, 6);
+        self.set_raw(7, 7, 6);
+        for x in [0, 2, 4, 6, 8] {
+            self.set_raw(x, 3, -7);
+            self.set_raw(x, 6, 7);
+        }
+    }
+
+    fn set_raw(&mut self, x: i64, y: i64, piece: i64) -> bool {
+        let Some(index) = self.index(x, y) else {
+            return false;
+        };
+        self.cells[index] = piece;
+        true
+    }
+
+    fn index(&self, x: i64, y: i64) -> Option<usize> {
+        if !(0..XIANGQI_BOARD_WIDTH).contains(&x) || !(0..XIANGQI_BOARD_HEIGHT).contains(&y) {
+            return None;
+        }
+        Some((y * XIANGQI_BOARD_WIDTH + x) as usize)
+    }
+}
+
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct XiangqiScriptState {
+    legal: bool,
+    winner: i64,
+    ai_move: Option<(i64, i64, i64, i64)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XiangqiScriptTelemetry {
+    pub jit_enabled: bool,
+    pub jit_trace_count: usize,
+    pub elapsed_micros: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XiangqiMoveSummary {
+    pub legal: bool,
+    pub winner: i64,
+    pub telemetry: XiangqiScriptTelemetry,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XiangqiAiMove {
+    pub from_x: i64,
+    pub from_y: i64,
+    pub to_x: i64,
+    pub to_y: i64,
+    pub telemetry: XiangqiScriptTelemetry,
+}
+
 #[derive(Resource, Debug, Clone)]
 pub struct DamageRules {
     source: String,
@@ -286,6 +387,64 @@ pub fn choose_gomoku_ai_move(
         .ai_move
         .ok_or_else(|| "gomoku AI script did not select a move".to_string())?;
     Ok(GomokuAiMove { x, y, telemetry })
+}
+
+pub fn reset_xiangqi_board(world: &mut World) {
+    if let Some(mut board) = world.get_resource_mut::<XiangqiBoard>() {
+        board.reset();
+    } else {
+        world.insert_resource(XiangqiBoard::default());
+    }
+    world.insert_resource(XiangqiScriptState::default());
+}
+
+pub fn apply_xiangqi_move_script(
+    world: &mut World,
+    source: &str,
+    from_x: i64,
+    from_y: i64,
+    to_x: i64,
+    to_y: i64,
+    player: i64,
+) -> Result<XiangqiMoveSummary, String> {
+    ensure_xiangqi_resources(world);
+    world.insert_resource(XiangqiScriptState::default());
+    let wrapped = format!(
+        "let from_x: int = {from_x};\nlet from_y: int = {from_y};\nlet to_x: int = {to_x};\nlet to_y: int = {to_y};\nlet player: int = {player};\n{source}"
+    );
+    let (_value, telemetry) = with_xiangqi_context(world, || run_xiangqi_script(&wrapped, false))?;
+    let state = *world
+        .get_resource::<XiangqiScriptState>()
+        .ok_or_else(|| "xiangqi script did not publish a result".to_string())?;
+    Ok(XiangqiMoveSummary {
+        legal: state.legal,
+        winner: state.winner,
+        telemetry,
+    })
+}
+
+pub fn choose_xiangqi_ai_move(
+    world: &mut World,
+    source: &str,
+    ai_player: i64,
+) -> Result<XiangqiAiMove, String> {
+    ensure_xiangqi_resources(world);
+    world.insert_resource(XiangqiScriptState::default());
+    let wrapped = format!("let ai_player: int = {ai_player};\n{source}");
+    let (_value, telemetry) = with_xiangqi_context(world, || run_xiangqi_script(&wrapped, true))?;
+    let state = *world
+        .get_resource::<XiangqiScriptState>()
+        .ok_or_else(|| "xiangqi script did not publish an AI move".to_string())?;
+    let (from_x, from_y, to_x, to_y) = state
+        .ai_move
+        .ok_or_else(|| "xiangqi AI script did not select a move".to_string())?;
+    Ok(XiangqiAiMove {
+        from_x,
+        from_y,
+        to_x,
+        to_y,
+        telemetry,
+    })
 }
 
 pub fn tick_shooter_spawn_rules(
@@ -445,6 +604,15 @@ fn ensure_gomoku_resources(world: &mut World) {
     }
 }
 
+fn ensure_xiangqi_resources(world: &mut World) {
+    if !world.contains_resource::<XiangqiBoard>() {
+        world.insert_resource(XiangqiBoard::default());
+    }
+    if !world.contains_resource::<XiangqiScriptState>() {
+        world.insert_resource(XiangqiScriptState::default());
+    }
+}
+
 fn spawn_enemy_entity(
     world: &mut World,
     kind: &str,
@@ -532,10 +700,16 @@ struct GomokuContext {
     world: *mut World,
 }
 
+#[derive(Clone, Copy)]
+struct XiangqiContext {
+    world: *mut World,
+}
+
 thread_local! {
     static BEVY_CONTEXT: RefCell<Option<BevyContext>> = const { RefCell::new(None) };
     static SHOOTER_CONTEXT: RefCell<Option<ShooterContext>> = const { RefCell::new(None) };
     static GOMOKU_CONTEXT: RefCell<Option<GomokuContext>> = const { RefCell::new(None) };
+    static XIANGQI_CONTEXT: RefCell<Option<XiangqiContext>> = const { RefCell::new(None) };
 }
 
 struct BevyContextGuard;
@@ -563,6 +737,16 @@ struct GomokuContextGuard;
 impl Drop for GomokuContextGuard {
     fn drop(&mut self) {
         GOMOKU_CONTEXT.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
+}
+
+struct XiangqiContextGuard;
+
+impl Drop for XiangqiContextGuard {
+    fn drop(&mut self) {
+        XIANGQI_CONTEXT.with(|slot| {
             *slot.borrow_mut() = None;
         });
     }
@@ -602,6 +786,17 @@ fn with_gomoku_context<T>(
     f()
 }
 
+fn with_xiangqi_context<T>(
+    world: &mut World,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    XIANGQI_CONTEXT.with(|slot| {
+        *slot.borrow_mut() = Some(XiangqiContext { world });
+    });
+    let _guard = XiangqiContextGuard;
+    f()
+}
+
 fn with_world<T>(f: impl FnOnce(&mut World, Entity) -> VmResult<T>) -> VmResult<T> {
     BEVY_CONTEXT.with(|slot| {
         let ctx = slot
@@ -627,6 +822,16 @@ fn with_gomoku_world<T>(f: impl FnOnce(&mut World) -> VmResult<T>) -> VmResult<T
         let ctx = slot
             .borrow()
             .ok_or_else(|| VmError::HostError("missing Bevy gomoku context".to_string()))?;
+        // SAFETY: the pointer is installed only for one synchronous RustScript evaluation.
+        unsafe { f(&mut *ctx.world) }
+    })
+}
+
+fn with_xiangqi_world<T>(f: impl FnOnce(&mut World) -> VmResult<T>) -> VmResult<T> {
+    XIANGQI_CONTEXT.with(|slot| {
+        let ctx = slot
+            .borrow()
+            .ok_or_else(|| VmError::HostError("missing Bevy xiangqi context".to_string()))?;
         // SAFETY: the pointer is installed only for one synchronous RustScript evaluation.
         unsafe { f(&mut *ctx.world) }
     })
@@ -664,6 +869,38 @@ fn run_gomoku_script(source: &str) -> Result<(Value, GomokuScriptTelemetry), Str
     Ok((
         value,
         GomokuScriptTelemetry {
+            jit_enabled: jit_snapshot.config.enabled,
+            jit_trace_count: jit_snapshot.traces.len(),
+            elapsed_micros: started.elapsed().as_micros(),
+        },
+    ))
+}
+
+fn run_xiangqi_script(
+    source: &str,
+    enable_jit: bool,
+) -> Result<(Value, XiangqiScriptTelemetry), String> {
+    let started = Instant::now();
+    let compiled = compile_source(source).map_err(|err| err.to_string())?;
+    let mut vm = if enable_jit {
+        Vm::new_with_jit_config(compiled.program, shooter_jit_config())
+    } else {
+        Vm::new(compiled.program)
+    };
+    bind_xiangqi_hosts(&mut vm);
+    let status = vm.run().map_err(|err| err.to_string())?;
+    if status != VmStatus::Halted {
+        return Err(format!("script did not halt: {status:?}"));
+    }
+    let value = vm
+        .stack()
+        .last()
+        .cloned()
+        .ok_or_else(|| "script returned an empty stack".to_string())?;
+    let jit_snapshot = vm.jit_snapshot();
+    Ok((
+        value,
+        XiangqiScriptTelemetry {
             jit_enabled: jit_snapshot.config.enabled,
             jit_trace_count: jit_snapshot.traces.len(),
             elapsed_micros: started.elapsed().as_micros(),
@@ -761,6 +998,27 @@ fn bind_gomoku_hosts(vm: &mut Vm) {
     vm.bind_static_args_function(
         "bevy::Gomoku::set_ai_move",
         host::bevy::gomoku_set_ai_move_host,
+    );
+}
+
+fn bind_xiangqi_hosts(vm: &mut Vm) {
+    vm.bind_static_args_function(
+        "bevy::Xiangqi::board_width",
+        host::bevy::xiangqi_board_width_host,
+    );
+    vm.bind_static_args_function(
+        "bevy::Xiangqi::board_height",
+        host::bevy::xiangqi_board_height_host,
+    );
+    vm.bind_static_args_function("bevy::Xiangqi::cell", host::bevy::xiangqi_cell_host);
+    vm.bind_static_args_function("bevy::Xiangqi::set_cell", host::bevy::xiangqi_set_cell_host);
+    vm.bind_static_args_function(
+        "bevy::Xiangqi::set_move_result",
+        host::bevy::xiangqi_set_move_result_host,
+    );
+    vm.bind_static_args_function(
+        "bevy::Xiangqi::set_ai_move",
+        host::bevy::xiangqi_set_ai_move_host,
     );
 }
 
@@ -1169,6 +1427,90 @@ mod host {
 
         pub(crate) fn gomoku_set_ai_move_host(args: &[Value]) -> VmResult<CallOutcome> {
             return_one(gomoku_set_ai_move(args))
+        }
+
+        /// Returns the Xiangqi board width for RustScript scans.
+        #[pd_host_function(name = "bevy::Xiangqi::board_width")]
+        pub(crate) fn xiangqi_board_width_impl() -> VmResult<i64> {
+            with_xiangqi_world(|_world| Ok(XIANGQI_BOARD_WIDTH))
+        }
+
+        pub(crate) fn xiangqi_board_width_host(args: &[Value]) -> VmResult<CallOutcome> {
+            return_one(xiangqi_board_width(args))
+        }
+
+        /// Returns the Xiangqi board height for RustScript scans.
+        #[pd_host_function(name = "bevy::Xiangqi::board_height")]
+        pub(crate) fn xiangqi_board_height_impl() -> VmResult<i64> {
+            with_xiangqi_world(|_world| Ok(XIANGQI_BOARD_HEIGHT))
+        }
+
+        pub(crate) fn xiangqi_board_height_host(args: &[Value]) -> VmResult<CallOutcome> {
+            return_one(xiangqi_board_height(args))
+        }
+
+        /// Reads a Xiangqi cell; out-of-bounds cells return a sentinel value.
+        #[pd_host_function(name = "bevy::Xiangqi::cell")]
+        pub(crate) fn xiangqi_cell_impl(x: i64, y: i64) -> VmResult<i64> {
+            with_xiangqi_world(|world| {
+                ensure_xiangqi_resources(world);
+                let board = world.resource::<XiangqiBoard>();
+                Ok(board.cell(x, y))
+            })
+        }
+
+        pub(crate) fn xiangqi_cell_host(args: &[Value]) -> VmResult<CallOutcome> {
+            return_one(xiangqi_cell(args))
+        }
+
+        /// Writes a Xiangqi cell after RustScript has accepted a move.
+        #[pd_host_function(name = "bevy::Xiangqi::set_cell")]
+        pub(crate) fn xiangqi_set_cell_impl(x: i64, y: i64, piece: i64) -> VmResult<bool> {
+            with_xiangqi_world(|world| {
+                ensure_xiangqi_resources(world);
+                let mut board = world.resource_mut::<XiangqiBoard>();
+                Ok(board.set_raw(x, y, piece))
+            })
+        }
+
+        pub(crate) fn xiangqi_set_cell_host(args: &[Value]) -> VmResult<CallOutcome> {
+            return_one(xiangqi_set_cell(args))
+        }
+
+        /// Publishes RustScript move legality and winner.
+        #[pd_host_function(name = "bevy::Xiangqi::set_move_result")]
+        pub(crate) fn xiangqi_set_move_result_impl(legal: bool, winner: i64) -> VmResult<bool> {
+            with_xiangqi_world(|world| {
+                ensure_xiangqi_resources(world);
+                let mut state = world.resource_mut::<XiangqiScriptState>();
+                state.legal = legal;
+                state.winner = winner;
+                Ok(true)
+            })
+        }
+
+        pub(crate) fn xiangqi_set_move_result_host(args: &[Value]) -> VmResult<CallOutcome> {
+            return_one(xiangqi_set_move_result(args))
+        }
+
+        /// Publishes the RustScript-selected Xiangqi move.
+        #[pd_host_function(name = "bevy::Xiangqi::set_ai_move")]
+        pub(crate) fn xiangqi_set_ai_move_impl(
+            from_x: i64,
+            from_y: i64,
+            to_x: i64,
+            to_y: i64,
+        ) -> VmResult<bool> {
+            with_xiangqi_world(|world| {
+                ensure_xiangqi_resources(world);
+                let mut state = world.resource_mut::<XiangqiScriptState>();
+                state.ai_move = Some((from_x, from_y, to_x, to_y));
+                Ok(true)
+            })
+        }
+
+        pub(crate) fn xiangqi_set_ai_move_host(args: &[Value]) -> VmResult<CallOutcome> {
+            return_one(xiangqi_set_ai_move(args))
         }
     }
 }

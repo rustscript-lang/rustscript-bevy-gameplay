@@ -98,3 +98,37 @@ fn gomoku_example_script_smoke_runs_end_to_end() {
         "gomoku smoke should report compiled traces for the latest AI script, not an accumulated run count: {stdout}"
     );
 }
+
+#[test]
+fn xiangqi_example_script_smoke_runs_end_to_end() {
+    let output = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()))
+        .args([
+            "run",
+            "--quiet",
+            "--example",
+            "xiangqi",
+            "--",
+            "--script-smoke",
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("xiangqi example smoke should launch");
+
+    assert!(
+        output.status.success(),
+        "xiangqi smoke failed\nstatus: {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("xiangqi_turns=")
+            && stdout.contains("pieces=")
+            && stdout.contains("jit_enabled=true")
+            && stdout.contains("jit_traces=")
+            && stdout.contains("ai_move_us="),
+        "unexpected xiangqi example stdout:\n{stdout}"
+    );
+}
