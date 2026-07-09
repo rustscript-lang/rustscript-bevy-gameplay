@@ -1,9 +1,15 @@
 name: Release
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to upload assets to"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -45,12 +51,6 @@ jobs:
         with:
           repository: rustscript-lang/rustscript
           path: rustscript
-
-      - name: Checkout pd-edge sibling
-        uses: actions/checkout@v4
-        with:
-          repository: rustscript-lang/pd-edge
-          path: pd-edge
 
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
@@ -110,15 +110,9 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"archive={archive.as_posix()}\n")
 
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rustscript-bevy-gameplay-examples-${{ matrix.platform }}
-          path: ${{ steps.package.outputs.archive }}
-          if-no-files-found: error
-
       - name: Upload release asset
-        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           files: ${{ steps.package.outputs.archive }}
+          fail_on_unmatched_files: true
