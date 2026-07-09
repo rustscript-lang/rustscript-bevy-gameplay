@@ -72,7 +72,7 @@ jobs:
 
       - name: Build release example binaries
         working-directory: rustscript-bevy-gameplay
-        run: cargo build --release --example combat --example shooter --locked
+        run: cargo build --release --example shooter --example gomoku --example xiangqi --locked
 
       - name: Package example binaries
         id: package
@@ -100,7 +100,7 @@ jobs:
               shutil.rmtree(package_dir)
           package_dir.mkdir(parents=True, exist_ok=True)
 
-          for example in ("combat", "shooter"):
+          for example in ("shooter", "gomoku", "xiangqi"):
               src = target_examples / f"{example}{exe_suffix}"
               if not src.exists():
                   raise FileNotFoundError(f"missing built example binary: {src}")
