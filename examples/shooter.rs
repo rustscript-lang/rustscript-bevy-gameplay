@@ -7,21 +7,22 @@ use bevy_egui::{
     PrimaryEguiContext, egui,
 };
 use rustscript_bevy_gameplay::{
-    AttackCooldownMs, AttackPower, AttackStyle, Enemy, Health, Player, Position,
-    ScriptManagedEnemy, Velocity, apply_shooter_script,
+    AttackCooldownMs, AttackPower, AttackStyle, Enemy, Health, Player, PlayerProjectileLoadout,
+    Position, RewardItem, ScriptManagedEnemy, Velocity, apply_shooter_script,
 };
 use std::f32::consts::FRAC_PI_2;
 
 const SCRIPT: &str = include_str!("../scripts/shooter_game.rss");
-const LEFT: f32 = -430.0;
-const RIGHT: f32 = 520.0;
-const TOP: f32 = 260.0;
-const BOTTOM: f32 = -260.0;
+const LEFT: f32 = -260.0;
+const RIGHT: f32 = 260.0;
+const TOP: f32 = 520.0;
+const BOTTOM: f32 = -520.0;
+const PLAYER_MAX_HEALTH: i64 = 120;
 const SCRIPT_PANEL_WIDTH: f32 = 430.0;
-const GAMEPLAY_VIEW_WIDTH: u32 = 1180;
-const GAMEPLAY_VIEW_HEIGHT: u32 = 720;
-const GAMEPLAY_WORLD_PADDING_X: f32 = 320.0;
-const GAMEPLAY_WORLD_PADDING_Y: f32 = 240.0;
+const GAMEPLAY_VIEW_WIDTH: u32 = 720;
+const GAMEPLAY_VIEW_HEIGHT: u32 = 1180;
+const GAMEPLAY_WORLD_PADDING_X: f32 = 220.0;
+const GAMEPLAY_WORLD_PADDING_Y: f32 = 220.0;
 
 fn shooter_asset_file_path() -> String {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -80,7 +81,7 @@ fn main() {
                 }),
         )
         .add_plugins(EguiPlugin::default())
-        .insert_resource(ClearColor(Color::srgb(0.02, 0.025, 0.045)))
+        .insert_resource(ClearColor(Color::srgb(0.055, 0.085, 0.14)))
         .insert_resource(Score(0))
         .insert_resource(ScriptEditor {
             buffer: SCRIPT.to_string(),
@@ -106,6 +107,7 @@ fn main() {
                 animate_sprites,
                 animate_visual_motion,
                 collisions,
+                collect_rewards,
                 despawn_out_of_bounds,
             )
                 .chain(),
@@ -117,11 +119,14 @@ fn run_script_smoke() {
     let mut world = bevy_ecs::prelude::World::new();
     let summary = apply_shooter_script(&mut world, SCRIPT).expect("shooter script should apply");
     println!(
-        "player_hp={}, attack={}:{}, enemies={}",
+        "player_hp={}, attack={}:{}, projectiles={}:{}, enemies={}, rewards={}",
         summary.player_health,
         summary.player_attack_style,
         summary.player_attack_power,
-        summary.enemies_spawned
+        summary.player_projectile_kind,
+        summary.player_projectile_count,
+        summary.enemies_spawned,
+        summary.rewards_spawned
     );
 }
 
@@ -137,6 +142,7 @@ struct Score(u32);
 
 #[derive(Resource, Clone)]
 struct ShooterAssets {
+    background: Handle<Image>,
     player_frames: Vec<Handle<Image>>,
     enemy_red_frames: Vec<Handle<Image>>,
     enemy_green_frames: Vec<Handle<Image>>,
@@ -151,6 +157,7 @@ struct ShooterAssets {
 impl ShooterAssets {
     fn load(asset_server: &AssetServer) -> Self {
         Self {
+            background: asset_server.load("shooter/background_nebula.png"),
             player_frames: load_images(
                 asset_server,
                 &[
@@ -230,6 +237,9 @@ struct PlayerShip;
 
 #[derive(Component)]
 struct EnemyShip;
+
+#[derive(Component)]
+struct RewardPickup;
 
 #[derive(Component)]
 struct GameCamera;
@@ -335,7 +345,13 @@ struct FireClock {
 }
 
 type AddedEnemyQuery<'w, 's> =
-    Query<'w, 's, (Entity, &'static Enemy), (Added<Enemy>, Without<EnemyShip>)>;
+    Query<'w, 's, (Entity, &'static Enemy, &'static Position), (Added<Enemy>, Without<EnemyShip>)>;
+type AddedRewardQuery<'w, 's> = Query<
+    'w,
+    's,
+    (Entity, &'static RewardItem, &'static Position),
+    (Added<RewardItem>, Without<RewardPickup>),
+>;
 type BulletPositionQuery<'w, 's> = Query<'w, 's, (Entity, &'static Position), With<Projectile>>;
 type MovingProjectileQuery<'w, 's> =
     Query<'w, 's, (&'static Velocity, &'static mut Position), With<Projectile>>;
@@ -358,19 +374,31 @@ fn setup(
         gameplay_camera_transform(),
         gameplay_camera_projection(),
     ));
+    spawn_background(&mut commands, &assets);
     spawn_starfield(&mut commands, &assets);
     commands.insert_resource(assets);
 }
 
+fn spawn_background(commands: &mut Commands, assets: &ShooterAssets) {
+    commands.spawn((
+        Sprite::from_image(assets.background.clone()),
+        Transform {
+            translation: Vec3::new((LEFT + RIGHT) * 0.5, (TOP + BOTTOM) * 0.5, -20.0),
+            scale: Vec3::splat(1.08),
+            ..default()
+        },
+    ));
+}
+
 fn spawn_starfield(commands: &mut Commands, assets: &ShooterAssets) {
-    for index in 0..48 {
+    for index in 0..72 {
         let image = assets.bolt_frames[index % assets.bolt_frames.len()].clone();
         let mut sprite = Sprite::from_image(image);
         let alpha = if index % 3 == 0 { 0.24 } else { 0.14 };
         sprite.color = Color::srgba(0.62, 0.78, 1.0, alpha);
 
-        let x = LEFT + 40.0 + ((index * 83) % 880) as f32;
-        let y = BOTTOM + 20.0 + ((index * 47) % 500) as f32;
+        let x = LEFT + 20.0 + ((index * 83) % 500) as f32;
+        let y = BOTTOM + 30.0 + ((index * 47) % 1000) as f32;
         let scale = 0.16 + (index % 5) as f32 * 0.025;
         commands.spawn((
             sprite,
@@ -424,17 +452,18 @@ fn apply_pending_script(world: &mut World) {
 fn attach_render_components(
     mut commands: Commands,
     assets: Res<ShooterAssets>,
-    players: Query<Entity, (Added<Player>, Without<PlayerShip>)>,
+    players: Query<(Entity, &Position), (Added<Player>, Without<PlayerShip>)>,
     enemies: AddedEnemyQuery,
+    rewards: AddedRewardQuery,
 ) {
-    for entity in &players {
+    for (entity, position) in &players {
         let frames = assets.player_frames.clone();
         commands.entity(entity).insert((
             Sprite::from_image(frames[0].clone()),
             Transform {
-                translation: Vec3::new(-360.0, 0.0, 2.0),
+                translation: Vec3::new(position.x, position.y, 2.0),
                 scale: Vec3::splat(3.1),
-                rotation: Quat::from_rotation_z(-FRAC_PI_2),
+                rotation: Quat::default(),
             },
             PlayerShip,
             FireClock { elapsed_ms: 0.0 },
@@ -448,14 +477,14 @@ fn attach_render_components(
         ));
     }
 
-    for (entity, enemy) in &enemies {
+    for (entity, enemy, position) in &enemies {
         let frames = assets.enemy_frames(&enemy.kind);
         commands.entity(entity).insert((
             Sprite::from_image(frames[0].clone()),
             Transform {
-                translation: Vec3::new(0.0, 0.0, 2.0),
+                translation: Vec3::new(position.x, position.y, 2.0),
                 scale: Vec3::splat(3.0),
-                rotation: Quat::from_rotation_z(FRAC_PI_2),
+                rotation: Quat::from_rotation_z(std::f32::consts::PI),
             },
             EnemyShip,
             FireClock { elapsed_ms: 0.0 },
@@ -468,12 +497,39 @@ fn attach_render_components(
             },
         ));
     }
+
+    for (entity, reward, position) in &rewards {
+        let image = match reward.kind.as_str() {
+            "health" | "hp" => assets.shockwave_frames[0].clone(),
+            _ => assets.bolt_frames[0].clone(),
+        };
+        let mut sprite = Sprite::from_image(image);
+        sprite.color = match reward.kind.as_str() {
+            "health" | "hp" => Color::srgba(0.38, 1.0, 0.58, 0.94),
+            _ => Color::srgba(0.32, 0.86, 1.0, 0.94),
+        };
+        commands.entity(entity).insert((
+            sprite,
+            Transform {
+                translation: Vec3::new(position.x, position.y, 2.5),
+                scale: Vec3::splat(1.55),
+                ..default()
+            },
+            RewardPickup,
+            VisualMotion {
+                base_scale: Vec3::splat(1.55),
+                pulse: 0.12,
+                spin: 0.45,
+                phase: 0.8,
+            },
+        ));
+    }
 }
 
 fn move_player(
     input: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
-    mut query: Query<&mut Position, With<Player>>,
+    mut query: Query<(&Health, &mut Position), With<Player>>,
 ) {
     let mut direction = Vec2::ZERO;
     if input.pressed(KeyCode::ArrowLeft) || input.pressed(KeyCode::KeyA) {
@@ -491,9 +547,14 @@ fn move_player(
     if direction.length_squared() > 0.0 {
         direction = direction.normalize();
     }
-    for mut position in &mut query {
-        position.x = (position.x + direction.x * 300.0 * time.delta_secs()).clamp(LEFT, 130.0);
-        position.y = (position.y + direction.y * 300.0 * time.delta_secs()).clamp(BOTTOM, TOP);
+    for (health, mut position) in &mut query {
+        if health.0 <= 0 {
+            continue;
+        }
+        position.x =
+            (position.x + direction.x * 300.0 * time.delta_secs()).clamp(LEFT + 42.0, RIGHT - 42.0);
+        position.y = (position.y + direction.y * 300.0 * time.delta_secs())
+            .clamp(BOTTOM + 54.0, TOP - 120.0);
     }
 }
 
@@ -502,18 +563,18 @@ fn enemy_motion(
     mut query: Query<(&AttackStyle, &mut Position, &mut Velocity), With<Enemy>>,
 ) {
     for (style, mut position, mut velocity) in &mut query {
-        velocity.x = match style.0.as_str() {
+        velocity.y = match style.0.as_str() {
             "burst" => -65.0,
             "wave" => -45.0,
             _ => -55.0,
         };
         if style.0 == "wave" {
-            velocity.y = (time.elapsed_secs() * 3.0 + position.x * 0.02).sin() * 80.0;
+            velocity.x = (time.elapsed_secs() * 3.0 + position.y * 0.02).sin() * 80.0;
         } else {
-            velocity.y = 0.0;
+            velocity.x = 0.0;
         }
-        position.x += velocity.x * time.delta_secs();
-        position.y = (position.y + velocity.y * time.delta_secs()).clamp(BOTTOM, TOP);
+        position.y += velocity.y * time.delta_secs();
+        position.x = (position.x + velocity.x * time.delta_secs()).clamp(LEFT + 32.0, RIGHT - 32.0);
     }
 }
 
@@ -527,18 +588,28 @@ fn player_fire(
             &AttackStyle,
             &AttackPower,
             &AttackCooldownMs,
+            &PlayerProjectileLoadout,
+            &Health,
             &mut FireClock,
         ),
         With<Player>,
     >,
 ) {
-    for (position, style, power, cooldown, mut clock) in &mut query {
+    for (position, style, power, cooldown, loadout, health, mut clock) in &mut query {
+        if health.0 <= 0 {
+            continue;
+        }
         clock.elapsed_ms += time.delta_secs() * 1000.0;
         if clock.elapsed_ms < cooldown.0 as f32 {
             continue;
         }
         clock.elapsed_ms = 0.0;
-        for shot in projectile_plan(ProjectileOwner::Player, style.0.as_str(), power.0) {
+        for shot in projectile_plan(
+            ProjectileOwner::Player,
+            style.0.as_str(),
+            power.0,
+            Some(loadout),
+        ) {
             spawn_projectile(
                 &mut commands,
                 &assets,
@@ -558,12 +629,12 @@ fn enemy_fire(
 ) {
     for (position, style, power, mut clock) in &mut query {
         clock.elapsed_ms += time.delta_secs() * 1000.0;
-        let cooldown = if style.0 == "burst" { 700.0 } else { 1100.0 };
+        let cooldown = if style.0 == "burst" { 1200.0 } else { 1500.0 };
         if clock.elapsed_ms < cooldown {
             continue;
         }
         clock.elapsed_ms = 0.0;
-        for shot in projectile_plan(ProjectileOwner::Enemy, style.0.as_str(), power.0) {
+        for shot in projectile_plan(ProjectileOwner::Enemy, style.0.as_str(), power.0, None) {
             spawn_projectile(
                 &mut commands,
                 &assets,
@@ -575,29 +646,40 @@ fn enemy_fire(
     }
 }
 
-fn projectile_plan(owner: ProjectileOwner, style: &str, power: i64) -> Vec<ProjectileShot> {
+fn projectile_plan(
+    owner: ProjectileOwner,
+    style: &str,
+    power: i64,
+    loadout: Option<&PlayerProjectileLoadout>,
+) -> Vec<ProjectileShot> {
+    if owner == ProjectileOwner::Player {
+        let kind = loadout.map(|value| value.kind.as_str()).unwrap_or(style);
+        let count = loadout.map(|value| value.count).unwrap_or(1);
+        return player_projectile_plan(kind, count, power);
+    }
+
     let sign = owner.forward_sign();
     match style {
         "spread" => vec![
             ProjectileShot {
                 kind: ProjectileKind::Spread,
                 damage: power,
-                velocity: Vec2::new(460.0 * sign, 90.0),
+                velocity: Vec2::new(-90.0, 460.0 * sign),
             },
             ProjectileShot {
                 kind: ProjectileKind::Spread,
                 damage: power,
-                velocity: Vec2::new(500.0 * sign, 0.0),
+                velocity: Vec2::new(0.0, 500.0 * sign),
             },
             ProjectileShot {
                 kind: ProjectileKind::Spread,
                 damage: power,
-                velocity: Vec2::new(460.0 * sign, -90.0),
+                velocity: Vec2::new(90.0, 460.0 * sign),
             },
             ProjectileShot {
                 kind: ProjectileKind::HomingMissile,
                 damage: power + 5,
-                velocity: Vec2::new(330.0 * sign, 0.0),
+                velocity: Vec2::new(0.0, 330.0 * sign),
             },
             ProjectileShot {
                 kind: ProjectileKind::Shockwave,
@@ -609,36 +691,36 @@ fn projectile_plan(owner: ProjectileOwner, style: &str, power: i64) -> Vec<Proje
             ProjectileShot {
                 kind: ProjectileKind::Laser,
                 damage: power * 2,
-                velocity: Vec2::new(760.0 * sign, 0.0),
+                velocity: Vec2::new(0.0, 760.0 * sign),
             },
             ProjectileShot {
                 kind: ProjectileKind::HomingMissile,
                 damage: power + 7,
-                velocity: Vec2::new(360.0 * sign, 0.0),
+                velocity: Vec2::new(0.0, 360.0 * sign),
             },
         ],
         "burst" => vec![
             ProjectileShot {
                 kind: ProjectileKind::Spread,
                 damage: power,
-                velocity: Vec2::new(260.0 * sign, 80.0),
+                velocity: Vec2::new(-80.0, 260.0 * sign),
             },
             ProjectileShot {
                 kind: ProjectileKind::Spread,
                 damage: power,
-                velocity: Vec2::new(260.0 * sign, -80.0),
+                velocity: Vec2::new(80.0, 260.0 * sign),
             },
             ProjectileShot {
                 kind: ProjectileKind::HomingMissile,
                 damage: power + 4,
-                velocity: Vec2::new(300.0 * sign, 0.0),
+                velocity: Vec2::new(0.0, 300.0 * sign),
             },
         ],
         "wave" => vec![
             ProjectileShot {
                 kind: ProjectileKind::Bolt,
                 damage: power + 2,
-                velocity: Vec2::new(240.0 * sign, 120.0),
+                velocity: Vec2::new(120.0, 240.0 * sign),
             },
             ProjectileShot {
                 kind: ProjectileKind::Shockwave,
@@ -649,7 +731,7 @@ fn projectile_plan(owner: ProjectileOwner, style: &str, power: i64) -> Vec<Proje
         "missile" | "homing" => vec![ProjectileShot {
             kind: ProjectileKind::HomingMissile,
             damage: power + 8,
-            velocity: Vec2::new(360.0 * sign, 0.0),
+            velocity: Vec2::new(0.0, 360.0 * sign),
         }],
         "shockwave" => vec![ProjectileShot {
             kind: ProjectileKind::Shockwave,
@@ -659,8 +741,48 @@ fn projectile_plan(owner: ProjectileOwner, style: &str, power: i64) -> Vec<Proje
         _ => vec![ProjectileShot {
             kind: ProjectileKind::Bolt,
             damage: power,
-            velocity: Vec2::new(520.0 * sign, 0.0),
+            velocity: Vec2::new(0.0, 520.0 * sign),
         }],
+    }
+}
+
+fn player_projectile_plan(kind: &str, count: i64, power: i64) -> Vec<ProjectileShot> {
+    let count = count.clamp(1, 5) as usize;
+    let offsets = lateral_speeds(count);
+    let shot_kind = match kind {
+        "spread" => ProjectileKind::Spread,
+        "laser" => ProjectileKind::Laser,
+        "missile" | "homing" => ProjectileKind::HomingMissile,
+        "shockwave" => ProjectileKind::Shockwave,
+        _ => ProjectileKind::Bolt,
+    };
+
+    offsets
+        .into_iter()
+        .map(|lateral| {
+            let (damage, speed_y) = match shot_kind {
+                ProjectileKind::Bolt => (power, 560.0),
+                ProjectileKind::Spread => (power, 520.0),
+                ProjectileKind::Laser => (power + 4, 760.0),
+                ProjectileKind::HomingMissile => (power + 6, 360.0),
+                ProjectileKind::Shockwave => ((power / 2).max(4), 0.0),
+            };
+            ProjectileShot {
+                kind: shot_kind,
+                damage,
+                velocity: Vec2::new(lateral, speed_y),
+            }
+        })
+        .collect()
+}
+
+fn lateral_speeds(count: usize) -> Vec<f32> {
+    match count {
+        1 => vec![0.0],
+        2 => vec![-55.0, 55.0],
+        3 => vec![-95.0, 0.0, 95.0],
+        4 => vec![-120.0, -40.0, 40.0, 120.0],
+        _ => vec![-135.0, -70.0, 0.0, 70.0, 135.0],
     }
 }
 
@@ -672,10 +794,9 @@ fn spawn_projectile(
     shot: ProjectileShot,
 ) {
     let spec = projectile_spec(shot.kind);
-    let spawn_x = origin.x + owner.forward_sign() * spec.spawn_offset;
     let spawn_position = Position {
-        x: spawn_x,
-        y: origin.y,
+        x: origin.x,
+        y: origin.y + owner.forward_sign() * spec.spawn_offset,
     };
     let frames = projectile_frames(assets, owner, shot.kind);
     let mut entity = commands.spawn((
@@ -830,7 +951,10 @@ fn projectile_frames(
 
 fn projectile_rotation(velocity: Vec2, owner: ProjectileOwner) -> Quat {
     if velocity.length_squared() == 0.0 {
-        return Quat::from_rotation_z(-FRAC_PI_2 * owner.forward_sign());
+        return match owner {
+            ProjectileOwner::Player => Quat::default(),
+            ProjectileOwner::Enemy => Quat::from_rotation_z(std::f32::consts::PI),
+        };
     }
     Quat::from_rotation_z(velocity.y.atan2(velocity.x) - FRAC_PI_2)
 }
@@ -1030,12 +1154,40 @@ fn collisions(
                     continue;
                 }
 
-                player_health.0 -= projectile.damage;
+                player_health.0 = (player_health.0 - projectile.damage).max(0);
                 if !projectile.pierces {
                     commands.entity(projectile_entity).despawn();
                 }
             }
         }
+    }
+}
+
+fn collect_rewards(
+    mut commands: Commands,
+    mut players: Query<(&Position, &mut Health, &mut PlayerProjectileLoadout), With<Player>>,
+    rewards: Query<(Entity, &Position, &RewardItem), Without<Player>>,
+) {
+    let Some((player_position, mut health, mut loadout)) = players.iter_mut().next() else {
+        return;
+    };
+
+    for (entity, reward_position, reward) in &rewards {
+        if !overlaps(*player_position, *reward_position, 42.0) {
+            continue;
+        }
+
+        match reward.kind.as_str() {
+            "health" | "hp" => {
+                health.0 = (health.0 + reward.amount).clamp(0, PLAYER_MAX_HEALTH);
+            }
+            "bullets" | "bullet" | "ammo" => {
+                loadout.count = (loadout.count + reward.amount).clamp(1, 5);
+            }
+            _ => {}
+        }
+
+        commands.entity(entity).despawn();
     }
 }
 
@@ -1068,13 +1220,16 @@ fn despawn_out_of_bounds(
     enemies: ScriptManagedEnemyPositionQuery,
 ) {
     for (entity, position) in &bullets {
-        if position.x < LEFT - 160.0 || position.x > RIGHT + 160.0 || position.y.abs() > TOP + 120.0
+        if position.x < LEFT - 140.0
+            || position.x > RIGHT + 140.0
+            || position.y < BOTTOM - 160.0
+            || position.y > TOP + 160.0
         {
             commands.entity(entity).despawn();
         }
     }
     for (entity, position) in &enemies {
-        if position.x < LEFT - 120.0 {
+        if position.y < BOTTOM - 120.0 {
             commands.entity(entity).despawn();
         }
     }
@@ -1084,21 +1239,58 @@ fn script_panel(
     mut contexts: EguiContexts,
     mut editor: ResMut<ScriptEditor>,
     score: Res<Score>,
-    player: Query<(&Health, &AttackStyle, &AttackPower), With<Player>>,
+    player: Query<
+        (
+            &Health,
+            &AttackStyle,
+            &AttackPower,
+            &PlayerProjectileLoadout,
+        ),
+        With<Player>,
+    >,
     enemies: Query<&Enemy>,
 ) -> bevy::prelude::Result {
     let ctx = contexts.ctx_mut()?;
+    if let Some((health, _, _, loadout)) = player.iter().next() {
+        let ratio = (health.0.max(0) as f32 / PLAYER_MAX_HEALTH as f32).clamp(0.0, 1.0);
+        egui::Area::new(egui::Id::new("shooter_hud"))
+            .anchor(egui::Align2::LEFT_TOP, egui::vec2(16.0, 16.0))
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgba_unmultiplied(8, 16, 28, 190))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgb(70, 115, 150),
+                    ))
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .inner_margin(egui::Margin::symmetric(10, 8))
+                    .show(ui, |ui| {
+                        ui.set_width(190.0);
+                        ui.label("HP");
+                        ui.add(
+                            egui::ProgressBar::new(ratio)
+                                .fill(egui::Color32::from_rgb(80, 220, 128))
+                                .text(format!("{}/{}", health.0.max(0), PLAYER_MAX_HEALTH)),
+                        );
+                        ui.label(format!("{} x{}", loadout.kind, loadout.count));
+                    });
+            });
+    }
+
     egui::SidePanel::right("rustscript_panel")
         .resizable(true)
         .default_width(SCRIPT_PANEL_WIDTH)
         .show(ctx, |ui| {
             ui.heading("Live RustScript");
-            ui.label("Edit the script, then Save. The running Bevy world updates in place.");
             ui.separator();
-            if let Some((health, style, power)) = player.iter().next() {
+            if let Some((health, style, power, loadout)) = player.iter().next() {
                 ui.label(format!(
-                    "Player: hp {} / attack {} / power {}",
-                    health.0, style.0, power.0
+                    "Player: hp {} / attack {} / power {} / {} x{}",
+                    health.0.max(0),
+                    style.0,
+                    power.0,
+                    loadout.kind,
+                    loadout.count
                 ));
             }
             ui.label(format!(
@@ -1146,6 +1338,34 @@ mod tests {
     }
 
     #[test]
+    fn enemy_projectile_damage_clamps_player_health_to_zero() {
+        let mut app = App::new();
+        app.insert_resource(Score(0))
+            .add_systems(Update, collisions);
+
+        app.world_mut()
+            .spawn((Player, Position { x: 0.0, y: 0.0 }, Health(25)));
+        app.world_mut().spawn((
+            Position { x: 0.0, y: 0.0 },
+            Projectile {
+                owner: ProjectileOwner::Enemy,
+                damage: 99,
+                radius: 20.0,
+                pierces: false,
+            },
+        ));
+
+        app.update();
+
+        let (_, health) = app
+            .world_mut()
+            .query::<(&Player, &Health)>()
+            .single(app.world())
+            .expect("player should remain");
+        assert_eq!(health.0, 0);
+    }
+
+    #[test]
     fn default_window_reserves_space_for_script_panel() {
         assert_eq!(
             default_window_size(),
@@ -1154,7 +1374,7 @@ mod tests {
                 GAMEPLAY_VIEW_HEIGHT
             )
         );
-        assert!((gameplay_view_fraction() - 1180.0 / 1610.0).abs() < f32::EPSILON);
+        assert!((gameplay_view_fraction() - 720.0 / 1150.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1199,41 +1419,95 @@ mod tests {
         let asset_path = std::path::PathBuf::from(shooter_asset_file_path());
         assert!(asset_path.join("shooter/player_0.png").is_file());
         assert!(asset_path.join("shooter/shockwave_0.png").is_file());
+        assert!(asset_path.join("shooter/background_nebula.png").is_file());
     }
 
     #[test]
     fn projectile_plan_shares_advanced_projectiles_between_sides() {
-        let player_spread = projectile_plan(ProjectileOwner::Player, "spread", 10);
+        let player_loadout = PlayerProjectileLoadout {
+            kind: "missile".to_string(),
+            count: 2,
+        };
+        let player_spread =
+            projectile_plan(ProjectileOwner::Player, "spread", 10, Some(&player_loadout));
         assert!(
             player_spread
                 .iter()
                 .any(|shot| shot.kind == ProjectileKind::HomingMissile)
         );
-        assert!(
-            player_spread
-                .iter()
-                .any(|shot| shot.kind == ProjectileKind::Shockwave)
-        );
+        assert!(player_spread.iter().all(|shot| shot.velocity.y > 0.0));
+        assert_eq!(player_spread.len(), 2);
 
-        let enemy_burst = projectile_plan(ProjectileOwner::Enemy, "burst", 10);
+        let enemy_burst = projectile_plan(ProjectileOwner::Enemy, "burst", 10, None);
         assert!(
             enemy_burst
                 .iter()
                 .any(|shot| shot.kind == ProjectileKind::HomingMissile)
         );
 
-        let enemy_wave = projectile_plan(ProjectileOwner::Enemy, "wave", 10);
+        let enemy_wave = projectile_plan(ProjectileOwner::Enemy, "wave", 10, None);
         assert!(
             enemy_wave
                 .iter()
                 .any(|shot| shot.kind == ProjectileKind::Shockwave)
         );
 
-        let player_missile = projectile_plan(ProjectileOwner::Player, "missile", 10);
-        let enemy_missile = projectile_plan(ProjectileOwner::Enemy, "missile", 10);
+        let player_missile = projectile_plan(
+            ProjectileOwner::Player,
+            "missile",
+            10,
+            Some(&player_loadout),
+        );
+        let enemy_missile = projectile_plan(ProjectileOwner::Enemy, "missile", 10, None);
         assert_eq!(player_missile[0].kind, enemy_missile[0].kind);
-        assert!(player_missile[0].velocity.x > 0.0);
-        assert!(enemy_missile[0].velocity.x < 0.0);
+        assert!(player_missile[0].velocity.y > 0.0);
+        assert!(enemy_missile[0].velocity.y < 0.0);
+    }
+
+    #[test]
+    fn collecting_rewards_updates_player_health_and_projectile_count() {
+        let mut app = App::new();
+        app.add_systems(Update, collect_rewards);
+        app.world_mut().spawn((
+            Player,
+            Position { x: 0.0, y: 0.0 },
+            Health(90),
+            PlayerProjectileLoadout {
+                kind: "bolt".to_string(),
+                count: 1,
+            },
+        ));
+        app.world_mut().spawn((
+            RewardItem {
+                kind: "health".to_string(),
+                amount: 20,
+            },
+            Position { x: 8.0, y: 4.0 },
+        ));
+        app.world_mut().spawn((
+            RewardItem {
+                kind: "bullets".to_string(),
+                amount: 2,
+            },
+            Position { x: -6.0, y: 4.0 },
+        ));
+
+        app.update();
+
+        let (_, health, loadout) = app
+            .world_mut()
+            .query::<(&Player, &Health, &PlayerProjectileLoadout)>()
+            .single(app.world())
+            .expect("player should remain");
+        assert_eq!(health.0, 110);
+        assert_eq!(loadout.count, 3);
+
+        let reward_count = app
+            .world_mut()
+            .query::<&RewardItem>()
+            .iter(app.world())
+            .count();
+        assert_eq!(reward_count, 0);
     }
 
     #[test]

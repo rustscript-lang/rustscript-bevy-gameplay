@@ -10,3 +10,6 @@ Kenney publishes these packs under Creative Commons CC0 1.0 Universal.
 They can be used in commercial and non-commercial projects without attribution.
 
 CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/
+
+background_nebula.png is generated for this repository and is provided under
+the same CC0 terms.

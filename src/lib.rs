@@ -27,6 +27,18 @@ pub struct AttackPower(pub i64);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttackCooldownMs(pub i64);
 
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct PlayerProjectileLoadout {
+    pub kind: String,
+    pub count: i64,
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct RewardItem {
+    pub kind: String,
+    pub amount: i64,
+}
+
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct Position {
     pub x: f32,
@@ -42,13 +54,19 @@ pub struct Velocity {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScriptManagedEnemy;
 
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScriptManagedReward;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShooterSummary {
     pub player_health: i64,
     pub player_attack_style: String,
     pub player_attack_power: i64,
     pub player_attack_cooldown_ms: i64,
+    pub player_projectile_kind: String,
+    pub player_projectile_count: i64,
     pub enemies_spawned: usize,
+    pub rewards_spawned: usize,
 }
 
 #[derive(Resource, Debug, Clone)]
@@ -83,14 +101,15 @@ pub fn apply_scripted_damage(
 
 pub fn apply_shooter_script(world: &mut World, source: &str) -> Result<ShooterSummary, String> {
     compile_source(source).map_err(|err| err.to_string())?;
-    clear_script_managed_enemies(world);
+    clear_script_managed_entities::<ScriptManagedEnemy>(world);
+    clear_script_managed_entities::<ScriptManagedReward>(world);
     with_shooter_context(world, || run_shooter_value(source))?;
     summarize_shooter_world(world)
 }
 
-fn clear_script_managed_enemies(world: &mut World) {
+fn clear_script_managed_entities<T: Component>(world: &mut World) {
     let entities = world
-        .query_filtered::<Entity, With<ScriptManagedEnemy>>()
+        .query_filtered::<Entity, With<T>>()
         .iter(world)
         .collect::<Vec<_>>();
     for entity in entities {
@@ -99,26 +118,45 @@ fn clear_script_managed_enemies(world: &mut World) {
 }
 
 fn summarize_shooter_world(world: &mut World) -> Result<ShooterSummary, String> {
-    let (player_health, player_attack_style, player_attack_power, player_attack_cooldown_ms) = {
-        let (_, health, style, power, cooldown) = world
+    let (
+        player_health,
+        player_attack_style,
+        player_attack_power,
+        player_attack_cooldown_ms,
+        player_projectile_kind,
+        player_projectile_count,
+    ) = {
+        let (_, health, style, power, cooldown, loadout) = world
             .query::<(
                 &Player,
                 &Health,
                 &AttackStyle,
                 &AttackPower,
                 &AttackCooldownMs,
+                &PlayerProjectileLoadout,
             )>()
             .single(world)
             .map_err(|err| format!("shooter script must configure exactly one player: {err}"))?;
-        (health.0, style.0.clone(), power.0, cooldown.0)
+        (
+            health.0,
+            style.0.clone(),
+            power.0,
+            cooldown.0,
+            loadout.kind.clone(),
+            loadout.count,
+        )
     };
     let enemies_spawned = world.query::<&Enemy>().iter(world).count();
+    let rewards_spawned = world.query::<&RewardItem>().iter(world).count();
     Ok(ShooterSummary {
         player_health,
         player_attack_style,
         player_attack_power,
         player_attack_cooldown_ms,
+        player_projectile_kind,
+        player_projectile_count,
         enemies_spawned,
+        rewards_spawned,
     })
 }
 
@@ -133,7 +171,11 @@ fn ensure_player(world: &mut World) -> Entity {
             AttackStyle("straight".to_string()),
             AttackPower(10),
             AttackCooldownMs(180),
-            Position { x: -360.0, y: 0.0 },
+            PlayerProjectileLoadout {
+                kind: "bolt".to_string(),
+                count: 1,
+            },
+            Position { x: 0.0, y: -360.0 },
             Velocity { x: 0.0, y: 0.0 },
         ))
         .id()
@@ -285,6 +327,14 @@ fn bind_shooter_hosts(vm: &mut Vm) {
     vm.bind_static_args_function(
         "bevy::Shooter::spawn_enemy",
         host::bevy::shooter_spawn_enemy_host,
+    );
+    vm.bind_static_args_function(
+        "bevy::Shooter::set_player_projectiles",
+        host::bevy::shooter_set_player_projectiles_host,
+    );
+    vm.bind_static_args_function(
+        "bevy::Shooter::spawn_reward",
+        host::bevy::shooter_spawn_reward_host,
     );
 }
 
@@ -453,6 +503,31 @@ mod host {
             return_one(shooter_set_player_attack(args))
         }
 
+        /// Updates the player's projectile asset type and simultaneous count from RustScript.
+        #[pd_host_function(name = "bevy::Shooter::set_player_projectiles")]
+        pub(crate) fn shooter_set_player_projectiles_impl(
+            kind: &str,
+            count: i64,
+        ) -> VmResult<bool> {
+            with_shooter_world(|world| {
+                let player = ensure_player(world);
+                let mut loadout = world
+                    .get_mut::<PlayerProjectileLoadout>(player)
+                    .ok_or_else(|| {
+                        VmError::HostError(
+                            "player entity is missing PlayerProjectileLoadout".to_string(),
+                        )
+                    })?;
+                loadout.kind = kind.to_string();
+                loadout.count = count.clamp(1, 5);
+                Ok(true)
+            })
+        }
+
+        pub(crate) fn shooter_set_player_projectiles_host(args: &[Value]) -> VmResult<CallOutcome> {
+            return_one(shooter_set_player_projectiles(args))
+        }
+
         /// Spawns a script-managed enemy by calling Bevy World::spawn.
         #[pd_host_function(name = "bevy::Shooter::spawn_enemy")]
         pub(crate) fn shooter_spawn_enemy_impl(
@@ -469,13 +544,13 @@ mod host {
                     },
                     Health(health),
                     AttackStyle(attack_style.to_string()),
-                    AttackPower((health / 6).max(4)),
-                    AttackCooldownMs(900),
+                    AttackPower((health / 14).max(2)),
+                    AttackCooldownMs(1400),
                     Position {
                         x: x as f32,
                         y: y as f32,
                     },
-                    Velocity { x: -50.0, y: 0.0 },
+                    Velocity { x: 0.0, y: -50.0 },
                     ScriptManagedEnemy,
                 ));
                 Ok(true)
@@ -484,6 +559,34 @@ mod host {
 
         pub(crate) fn shooter_spawn_enemy_host(args: &[Value]) -> VmResult<CallOutcome> {
             return_one(shooter_spawn_enemy(args))
+        }
+
+        /// Spawns a script-managed reward pickup by calling Bevy World::spawn.
+        #[pd_host_function(name = "bevy::Shooter::spawn_reward")]
+        pub(crate) fn shooter_spawn_reward_impl(
+            kind: &str,
+            amount: i64,
+            x: i64,
+            y: i64,
+        ) -> VmResult<bool> {
+            with_shooter_world(|world| {
+                world.spawn((
+                    RewardItem {
+                        kind: kind.to_string(),
+                        amount,
+                    },
+                    Position {
+                        x: x as f32,
+                        y: y as f32,
+                    },
+                    ScriptManagedReward,
+                ));
+                Ok(true)
+            })
+        }
+
+        pub(crate) fn shooter_spawn_reward_host(args: &[Value]) -> VmResult<CallOutcome> {
+            return_one(shooter_spawn_reward(args))
         }
     }
 }

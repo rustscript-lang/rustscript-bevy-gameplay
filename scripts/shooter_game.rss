@@ -1,11 +1,15 @@
 use bevy;
 
-let hp: bool = bevy::Shooter::set_player_health(120);
-let attack: bool = bevy::Shooter::set_player_attack("spread", 14, 160);
+let hp: bool = bevy::Shooter::set_player_health(95);
+let attack: bool = bevy::Shooter::set_player_attack("straight", 8, 260);
+let loadout: bool = bevy::Shooter::set_player_projectiles("bolt", 1);
 
-let scout: bool = bevy::Shooter::spawn_enemy("scout", 18, "straight", 700, 120);
-let bomber: bool = bevy::Shooter::spawn_enemy("bomber", 42, "burst", 720, -40);
-let wave: bool = bevy::Shooter::spawn_enemy("weaver", 28, "wave", 820, 70);
-let tank: bool = bevy::Shooter::spawn_enemy("tank", 65, "straight", 900, -130);
+let scout: bool = bevy::Shooter::spawn_enemy("scout", 18, "straight", -170, 500);
+let bomber: bool = bevy::Shooter::spawn_enemy("bomber", 42, "burst", -40, 450);
+let wave: bool = bevy::Shooter::spawn_enemy("weaver", 28, "wave", 120, 520);
+let tank: bool = bevy::Shooter::spawn_enemy("tank", 65, "straight", 210, 470);
+
+let bullets: bool = bevy::Shooter::spawn_reward("bullets", 1, -120, -220);
+let health: bool = bevy::Shooter::spawn_reward("health", 20, 130, -280);
 
 true;
