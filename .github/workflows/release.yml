@@ -103,6 +103,8 @@ jobs:
           for extra in ("README.md", "LICENSE"):
               shutil.copy2(root / extra, package_dir / extra)
 
+          shutil.copytree(root / "assets", package_dir / "assets")
+
           with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
               for path in package_dir.rglob("*"):
                   zf.write(path, path.relative_to(package_dir.parent))

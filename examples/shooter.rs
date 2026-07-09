@@ -27,10 +27,42 @@ const GAMEPLAY_WORLD_PADDING_X: f32 = 220.0;
 const GAMEPLAY_WORLD_PADDING_Y: f32 = 220.0;
 
 fn shooter_asset_file_path() -> String {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .to_string_lossy()
-        .to_string()
+    let manifest_assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+    let current_exe = std::env::current_exe().ok();
+    let current_dir = std::env::current_dir().ok();
+    resolve_shooter_asset_file_path(
+        current_exe.as_deref(),
+        current_dir.as_deref(),
+        &manifest_assets,
+    )
+    .to_string_lossy()
+    .to_string()
+}
+
+fn resolve_shooter_asset_file_path(
+    current_exe: Option<&std::path::Path>,
+    current_dir: Option<&std::path::Path>,
+    manifest_assets: &std::path::Path,
+) -> std::path::PathBuf {
+    let mut candidates = Vec::new();
+    if let Some(exe_dir) = current_exe.and_then(std::path::Path::parent) {
+        candidates.push(exe_dir.join("assets"));
+    }
+    if let Some(cwd) = current_dir {
+        candidates.push(cwd.join("assets"));
+    }
+    candidates.push(manifest_assets.to_path_buf());
+
+    candidates
+        .into_iter()
+        .find(|path| shooter_asset_dir_has_required_files(path))
+        .unwrap_or_else(|| manifest_assets.to_path_buf())
+}
+
+fn shooter_asset_dir_has_required_files(path: &std::path::Path) -> bool {
+    path.join("shooter/background_nebula.png").is_file()
+        && path.join("shooter/player_0.png").is_file()
+        && path.join("shooter/enemy_craft_scout.png").is_file()
 }
 
 fn gameplay_camera_transform() -> Transform {
@@ -3085,6 +3117,28 @@ true;
         assert!(asset_path.join("shooter/enemy_craft_scout.png").is_file());
         assert!(asset_path.join("shooter/hit_flash.png").is_file());
         assert!(asset_path.join("shooter/explosion_0.png").is_file());
+    }
+
+    #[test]
+    fn shooter_asset_path_prefers_packaged_assets_next_to_exe() {
+        let temp_root =
+            std::env::temp_dir().join(format!("rustscript_shooter_assets_{}", std::process::id()));
+        let exe_dir = temp_root.join("package");
+        let packaged_shooter_dir = exe_dir.join("assets").join("shooter");
+        std::fs::create_dir_all(&packaged_shooter_dir).unwrap();
+        std::fs::write(packaged_shooter_dir.join("background_nebula.png"), b"png").unwrap();
+        std::fs::write(packaged_shooter_dir.join("player_0.png"), b"png").unwrap();
+        std::fs::write(packaged_shooter_dir.join("enemy_craft_scout.png"), b"png").unwrap();
+        let exe = exe_dir.join(format!("shooter{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&exe, b"exe").unwrap();
+        let cwd = temp_root.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let manifest_assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+
+        let resolved = resolve_shooter_asset_file_path(Some(&exe), Some(&cwd), &manifest_assets);
+
+        assert_eq!(resolved, exe_dir.join("assets"));
+        std::fs::remove_dir_all(temp_root).unwrap();
     }
 
     #[test]
