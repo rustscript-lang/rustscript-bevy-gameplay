@@ -1,7 +1,7 @@
+fn bevy_armor() -> int;
 fn damage_floor(damage) -> int;
 
-let raw = incoming - armor;
+let raw = incoming - bevy_armor();
 let crit_bonus = if critical => { raw } else => { 0 };
 let damage = raw + crit_bonus;
-let applied = damage_floor(damage);
-applied;
+damage_floor(damage);

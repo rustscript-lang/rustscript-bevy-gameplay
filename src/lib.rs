@@ -45,10 +45,10 @@ pub fn apply_scripted_damage(
 
 fn evaluate_damage(source: &str, incoming: i64, armor: i64, critical: bool) -> Result<i64, String> {
     let wrapped = format!(
-        "let incoming = {incoming};\nlet armor = {armor};\nlet critical = {};\n{source}",
+        "let incoming = {incoming};\nlet critical = {};\n{source}",
         if critical { "true" } else { "false" }
     );
-    match run_value(&wrapped)? {
+    match run_value(&wrapped, armor)? {
         Value::Int(value) => Ok(value),
         other => Err(format!("script returned {other:?}; expected int")),
     }
@@ -67,10 +67,24 @@ impl HostFunction for DamageFloorHost {
     }
 }
 
-fn run_value(source: &str) -> Result<Value, String> {
+struct BevyArmorHost {
+    armor: i64,
+}
+
+impl HostFunction for BevyArmorHost {
+    fn call(&mut self, _vm: &mut Vm, args: &[Value]) -> Result<CallOutcome, VmError> {
+        match args {
+            [] => Ok(CallOutcome::Return(CallReturn::one(Value::Int(self.armor)))),
+            _ => Err(VmError::TypeMismatch("no args")),
+        }
+    }
+}
+
+fn run_value(source: &str, armor: i64) -> Result<Value, String> {
     let compiled = compile_source(source).map_err(|err| err.to_string())?;
     let mut vm = Vm::new(compiled.program);
     vm.bind_function("damage_floor", Box::new(DamageFloorHost));
+    vm.bind_function("bevy_armor", Box::new(BevyArmorHost { armor }));
     let status = vm.run().map_err(|err| err.to_string())?;
     if status != VmStatus::Halted {
         return Err(format!("script did not halt: {status:?}"));
