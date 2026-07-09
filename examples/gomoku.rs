@@ -22,6 +22,9 @@ struct GomokuUiState {
     winner: i64,
     draw: bool,
     last_ai_move: Option<GomokuAiMove>,
+    jit_enabled: bool,
+    jit_trace_count: usize,
+    last_ai_move_micros: Option<u128>,
 }
 
 impl Default for GomokuUiState {
@@ -31,6 +34,9 @@ impl Default for GomokuUiState {
             winner: 0,
             draw: false,
             last_ai_move: None,
+            jit_enabled: true,
+            jit_trace_count: 0,
+            last_ai_move_micros: None,
         }
     }
 }
@@ -46,7 +52,7 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "RustScript Gomoku".to_string(),
-                resolution: WindowResolution::new(920, 960),
+                resolution: WindowResolution::new(860, 930),
                 resizable: true,
                 ..default()
             }),
@@ -78,6 +84,9 @@ fn run_script_smoke() {
     let mut turns = 0;
     let mut winner = 0;
     let mut draw = false;
+    let mut jit_enabled = false;
+    let mut jit_traces = 0;
+    let mut ai_move_us = 0;
 
     for &(x, y) in &human_moves {
         let human = apply_gomoku_move_script(&mut world, MOVE_SCRIPT, x, y, HUMAN)
@@ -94,6 +103,9 @@ fn run_script_smoke() {
 
         let ai_move =
             choose_gomoku_ai_move(&mut world, AI_SCRIPT, COMPUTER).expect("AI script should run");
+        jit_enabled = ai_move.telemetry.jit_enabled;
+        jit_traces = ai_move.telemetry.jit_trace_count;
+        ai_move_us = ai_move.telemetry.elapsed_micros;
         let ai = apply_gomoku_move_script(&mut world, MOVE_SCRIPT, ai_move.x, ai_move.y, COMPUTER)
             .expect("AI move script should run");
         if !ai.legal {
@@ -113,7 +125,9 @@ fn run_script_smoke() {
         .iter()
         .filter(|&&stone| stone != 0)
         .count();
-    println!("gomoku_turns={turns}, stones={stones}, winner={winner}, draw={draw}");
+    println!(
+        "gomoku_turns={turns}, stones={stones}, winner={winner}, draw={draw}, jit_enabled={jit_enabled}, jit_traces={jit_traces}, ai_move_us={ai_move_us}"
+    );
 }
 
 fn gomoku_ui(world: &mut World) {
@@ -132,19 +146,22 @@ fn gomoku_ui(world: &mut World) {
         .frame(egui::Frame::new().fill(egui::Color32::from_rgb(18, 21, 24)))
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
-                ui.add_space(16.0);
+                ui.add_space(10.0);
                 ui.heading(egui::RichText::new("RustScript Gomoku").size(32.0));
                 ui.add_space(4.0);
                 ui.label(status_text(&state));
+                ui.add_space(3.0);
+                ui.label(telemetry_text(&state));
                 ui.add_space(12.0);
                 if ui.button("Restart").clicked() {
                     restart = true;
                 }
-                ui.add_space(14.0);
+                ui.add_space(10.0);
             });
 
             ui.horizontal_centered(|ui| {
-                let board_side = ui.available_width().min(ui.available_height()).min(760.0);
+                let board_side =
+                    (ui.available_width().min(ui.available_height()) - 12.0).max(320.0);
                 clicked_move = draw_board(ui, &board, &state, board_side);
             });
         });
@@ -290,6 +307,7 @@ fn play_human_turn(world: &mut World, x: i64, y: i64) {
             return;
         }
     };
+    record_ai_telemetry(world, ai_move.telemetry);
     let ai = match apply_gomoku_move_script(world, MOVE_SCRIPT, ai_move.x, ai_move.y, COMPUTER) {
         Ok(summary) => summary,
         Err(err) => {
@@ -303,6 +321,16 @@ fn play_human_turn(world: &mut World, x: i64, y: i64) {
         return;
     }
     publish_move_state(world, ai, "AI moved", Some(ai_move));
+}
+
+fn record_ai_telemetry(
+    world: &mut World,
+    telemetry: rustscript_bevy_gameplay::GomokuScriptTelemetry,
+) {
+    let mut state = world.resource_mut::<GomokuUiState>();
+    state.jit_enabled = telemetry.jit_enabled;
+    state.jit_trace_count = telemetry.jit_trace_count;
+    state.last_ai_move_micros = Some(telemetry.elapsed_micros);
 }
 
 fn publish_move_state(
@@ -339,4 +367,18 @@ fn status_text(state: &GomokuUiState) -> egui::RichText {
     egui::RichText::new(text)
         .size(18.0)
         .color(egui::Color32::from_rgb(221, 224, 218))
+}
+
+fn telemetry_text(state: &GomokuUiState) -> egui::RichText {
+    let jit = if state.jit_enabled { "on" } else { "off" };
+    let ai_ms = state
+        .last_ai_move_micros
+        .map(|micros| format!("{:.2} ms", micros as f64 / 1000.0))
+        .unwrap_or_else(|| "--".to_string());
+    egui::RichText::new(format!(
+        "JIT: {jit}   traces: {}   AI move: {ai_ms}",
+        state.jit_trace_count
+    ))
+    .size(14.0)
+    .color(egui::Color32::from_rgb(174, 184, 188))
 }

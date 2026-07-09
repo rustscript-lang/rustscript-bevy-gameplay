@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::{cell::RefCell, time::Instant};
 
 use bevy_ecs::prelude::*;
 pub(crate) use vm::Vm;
@@ -183,12 +183,21 @@ pub struct GomokuMoveSummary {
     pub legal: bool,
     pub winner: i64,
     pub draw: bool,
+    pub telemetry: GomokuScriptTelemetry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GomokuAiMove {
     pub x: i64,
     pub y: i64,
+    pub telemetry: GomokuScriptTelemetry,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GomokuScriptTelemetry {
+    pub jit_enabled: bool,
+    pub jit_trace_count: usize,
+    pub elapsed_micros: u128,
 }
 
 #[derive(Resource, Debug, Clone)]
@@ -249,7 +258,7 @@ pub fn apply_gomoku_move_script(
     let wrapped = format!(
         "let move_x: int = {x};\nlet move_y: int = {y};\nlet player: int = {player};\n{source}"
     );
-    let _value = with_gomoku_context(world, || run_gomoku_script(&wrapped))?;
+    let (_value, telemetry) = with_gomoku_context(world, || run_gomoku_script(&wrapped))?;
     let state = *world
         .get_resource::<GomokuScriptState>()
         .ok_or_else(|| "gomoku script did not publish a result".to_string())?;
@@ -257,6 +266,7 @@ pub fn apply_gomoku_move_script(
         legal: state.legal,
         winner: state.winner,
         draw: state.draw,
+        telemetry,
     })
 }
 
@@ -268,14 +278,14 @@ pub fn choose_gomoku_ai_move(
     ensure_gomoku_resources(world);
     world.insert_resource(GomokuScriptState::default());
     let wrapped = format!("let ai_player: int = {ai_player};\n{source}");
-    let _value = with_gomoku_context(world, || run_gomoku_script(&wrapped))?;
+    let (_value, telemetry) = with_gomoku_context(world, || run_gomoku_script(&wrapped))?;
     let state = *world
         .get_resource::<GomokuScriptState>()
         .ok_or_else(|| "gomoku script did not publish an AI move".to_string())?;
     let (x, y) = state
         .ai_move
         .ok_or_else(|| "gomoku AI script did not select a move".to_string())?;
-    Ok(GomokuAiMove { x, y })
+    Ok(GomokuAiMove { x, y, telemetry })
 }
 
 pub fn tick_shooter_spawn_rules(
@@ -636,7 +646,8 @@ fn run_value(source: &str) -> Result<Value, String> {
         .ok_or_else(|| "script returned an empty stack".to_string())
 }
 
-fn run_gomoku_script(source: &str) -> Result<Value, String> {
+fn run_gomoku_script(source: &str) -> Result<(Value, GomokuScriptTelemetry), String> {
+    let started = Instant::now();
     let compiled = compile_source(source).map_err(|err| err.to_string())?;
     let mut vm = Vm::new_with_jit_config(compiled.program, shooter_jit_config());
     bind_gomoku_hosts(&mut vm);
@@ -644,10 +655,20 @@ fn run_gomoku_script(source: &str) -> Result<Value, String> {
     if status != VmStatus::Halted {
         return Err(format!("script did not halt: {status:?}"));
     }
-    vm.stack()
+    let value = vm
+        .stack()
         .last()
         .cloned()
-        .ok_or_else(|| "script returned an empty stack".to_string())
+        .ok_or_else(|| "script returned an empty stack".to_string())?;
+    let jit_snapshot = vm.jit_snapshot();
+    Ok((
+        value,
+        GomokuScriptTelemetry {
+            jit_enabled: jit_snapshot.config.enabled,
+            jit_trace_count: jit_snapshot.traces.len(),
+            elapsed_micros: started.elapsed().as_micros(),
+        },
+    ))
 }
 
 fn shooter_jit_config() -> JitConfig {

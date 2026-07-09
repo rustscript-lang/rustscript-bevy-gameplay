@@ -54,6 +54,15 @@ fn rustscript_ai_finishes_its_own_open_four() {
         choose_gomoku_ai_move(&mut world, AI_SCRIPT, 2).expect("AI script should choose a move");
 
     assert_eq!((ai_move.x, ai_move.y), (9, 7));
+    assert!(ai_move.telemetry.jit_enabled);
+    assert!(
+        ai_move.telemetry.jit_trace_count > 0,
+        "AI scan loops should produce JIT traces"
+    );
+    assert!(
+        ai_move.telemetry.elapsed_micros > 0,
+        "AI move should report elapsed time"
+    );
 }
 
 #[test]
@@ -64,6 +73,7 @@ fn rustscript_ai_blocks_player_open_four() {
         choose_gomoku_ai_move(&mut world, AI_SCRIPT, 2).expect("AI script should choose a move");
 
     assert_eq!((ai_move.x, ai_move.y), (9, 7));
+    assert!(ai_move.telemetry.jit_enabled);
 }
 
 #[test]
