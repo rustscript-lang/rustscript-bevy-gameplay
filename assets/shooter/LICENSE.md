@@ -9,6 +9,9 @@ The PNG files in this folder are selected from these Kenney asset packs:
 Kenney publishes these packs under Creative Commons CC0 1.0 Universal.
 They can be used in commercial and non-commercial projects without attribution.
 
+The enemy_craft_*.png, hit_flash.png, and explosion_*.png files are selected
+from Space Shooter Extension.
+
 CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/
 
 background_nebula.png is generated for this repository and is provided under

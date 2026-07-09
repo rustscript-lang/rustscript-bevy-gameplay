@@ -635,14 +635,21 @@ fn render_script_diagnostics(ui: &mut egui::Ui, diagnostics: &[ScriptDiagnostic]
 struct ShooterAssets {
     background: Handle<Image>,
     player_frames: Vec<Handle<Image>>,
-    enemy_red_frames: Vec<Handle<Image>>,
-    enemy_green_frames: Vec<Handle<Image>>,
-    enemy_yellow_frames: Vec<Handle<Image>>,
+    enemy_scout: Handle<Image>,
+    enemy_bomber: Handle<Image>,
+    enemy_weaver: Handle<Image>,
+    enemy_tank: Handle<Image>,
+    enemy_sniper: Handle<Image>,
+    enemy_carrier: Handle<Image>,
+    enemy_striker: Handle<Image>,
+    enemy_boss: Handle<Image>,
     bolt_frames: Vec<Handle<Image>>,
     laser_frames: Vec<Handle<Image>>,
     player_missile_frames: Vec<Handle<Image>>,
     enemy_missile_frames: Vec<Handle<Image>>,
     shockwave_frames: Vec<Handle<Image>>,
+    hit_effect: Handle<Image>,
+    explosion_frames: Vec<Handle<Image>>,
 }
 
 impl ShooterAssets {
@@ -657,30 +664,14 @@ impl ShooterAssets {
                     "shooter/player_2.png",
                 ],
             ),
-            enemy_red_frames: load_images(
-                asset_server,
-                &[
-                    "shooter/enemy_red_0.png",
-                    "shooter/enemy_red_1.png",
-                    "shooter/enemy_red_2.png",
-                ],
-            ),
-            enemy_green_frames: load_images(
-                asset_server,
-                &[
-                    "shooter/enemy_green_0.png",
-                    "shooter/enemy_green_1.png",
-                    "shooter/enemy_green_2.png",
-                ],
-            ),
-            enemy_yellow_frames: load_images(
-                asset_server,
-                &[
-                    "shooter/enemy_yellow_0.png",
-                    "shooter/enemy_yellow_1.png",
-                    "shooter/enemy_yellow_2.png",
-                ],
-            ),
+            enemy_scout: asset_server.load(enemy_asset_path_for_kind("scout")),
+            enemy_bomber: asset_server.load(enemy_asset_path_for_kind("bomber")),
+            enemy_weaver: asset_server.load(enemy_asset_path_for_kind("weaver")),
+            enemy_tank: asset_server.load(enemy_asset_path_for_kind("tank")),
+            enemy_sniper: asset_server.load(enemy_asset_path_for_kind("sniper")),
+            enemy_carrier: asset_server.load(enemy_asset_path_for_kind("carrier")),
+            enemy_striker: asset_server.load(enemy_asset_path_for_kind("striker")),
+            enemy_boss: asset_server.load(enemy_asset_path_for_kind("boss")),
             bolt_frames: load_images(asset_server, &["shooter/bolt_0.png", "shooter/bolt_1.png"]),
             laser_frames: load_images(
                 asset_server,
@@ -707,20 +698,66 @@ impl ShooterAssets {
                     "shooter/shockwave_4.png",
                 ],
             ),
+            hit_effect: asset_server.load("shooter/hit_flash.png"),
+            explosion_frames: load_images(
+                asset_server,
+                &[
+                    "shooter/explosion_0.png",
+                    "shooter/explosion_1.png",
+                    "shooter/explosion_2.png",
+                    "shooter/explosion_3.png",
+                    "shooter/explosion_4.png",
+                    "shooter/explosion_5.png",
+                    "shooter/explosion_6.png",
+                    "shooter/explosion_7.png",
+                    "shooter/explosion_8.png",
+                ],
+            ),
         }
     }
 
-    fn enemy_frames(&self, kind: &str) -> Vec<Handle<Image>> {
+    fn enemy_image(&self, kind: &str) -> Handle<Image> {
         match kind {
-            "tank" => self.enemy_yellow_frames.clone(),
-            "weaver" | "ace" => self.enemy_green_frames.clone(),
-            _ => self.enemy_red_frames.clone(),
+            "bomber" => self.enemy_bomber.clone(),
+            "weaver" | "ace" => self.enemy_weaver.clone(),
+            "tank" => self.enemy_tank.clone(),
+            "sniper" => self.enemy_sniper.clone(),
+            "carrier" => self.enemy_carrier.clone(),
+            "striker" => self.enemy_striker.clone(),
+            "boss" => self.enemy_boss.clone(),
+            _ => self.enemy_scout.clone(),
         }
     }
 }
 
 fn load_images(asset_server: &AssetServer, paths: &[&'static str]) -> Vec<Handle<Image>> {
     paths.iter().map(|path| asset_server.load(*path)).collect()
+}
+
+fn enemy_asset_path_for_kind(kind: &str) -> &'static str {
+    match kind {
+        "bomber" => "shooter/enemy_craft_bomber.png",
+        "weaver" | "ace" => "shooter/enemy_craft_weaver.png",
+        "tank" => "shooter/enemy_craft_tank.png",
+        "sniper" => "shooter/enemy_craft_sniper.png",
+        "carrier" => "shooter/enemy_craft_carrier.png",
+        "striker" => "shooter/enemy_craft_striker.png",
+        "boss" => "shooter/enemy_craft_boss.png",
+        _ => "shooter/enemy_craft_scout.png",
+    }
+}
+
+fn enemy_body_size_for_kind(kind: &str) -> Vec2 {
+    match kind {
+        "bomber" => Vec2::new(92.0, 54.0),
+        "weaver" | "ace" => Vec2::new(76.0, 70.0),
+        "tank" => Vec2::splat(104.0),
+        "sniper" => Vec2::new(92.0, 36.0),
+        "carrier" => Vec2::new(112.0, 62.0),
+        "striker" => Vec2::new(68.0, 76.0),
+        "boss" => Vec2::splat(150.0),
+        _ => Vec2::new(70.0, 80.0),
+    }
 }
 
 #[derive(Component)]
@@ -734,6 +771,12 @@ struct RewardPickup;
 
 #[derive(Component)]
 struct GameCamera;
+
+#[derive(Component)]
+struct HitEffect;
+
+#[derive(Component)]
+struct ExplosionEffect;
 
 #[derive(Component)]
 struct PlayerBullet;
@@ -1030,9 +1073,9 @@ fn attach_render_components(
     rewards: AddedRewardQuery,
 ) {
     for (entity, position) in &players {
-        let frames = assets.player_frames.clone();
+        let image = assets.player_frames[0].clone();
         commands.entity(entity).insert((
-            Sprite::from_image(frames[0].clone()),
+            Sprite::from_image(image),
             Transform {
                 translation: Vec3::new(position.x, position.y, 2.0),
                 scale: Vec3::splat(3.1),
@@ -1040,34 +1083,22 @@ fn attach_render_components(
             },
             PlayerShip,
             FireClock { elapsed_ms: 0.0 },
-            SpriteFrames::new(frames, 120.0),
-            VisualMotion {
-                base_scale: Vec3::splat(3.1),
-                pulse: 0.0,
-                spin: 0.0,
-                phase: 0.0,
-            },
         ));
     }
 
     for (entity, enemy, position) in &enemies {
-        let frames = assets.enemy_frames(&enemy.kind);
+        let image = assets.enemy_image(&enemy.kind);
+        let mut sprite = Sprite::from_image(image);
+        sprite.custom_size = Some(enemy_body_size_for_kind(&enemy.kind));
         commands.entity(entity).insert((
-            Sprite::from_image(frames[0].clone()),
+            sprite,
             Transform {
                 translation: Vec3::new(position.x, position.y, 2.0),
-                scale: Vec3::splat(3.0),
-                rotation: Quat::from_rotation_z(std::f32::consts::PI),
+                scale: Vec3::ONE,
+                rotation: Quat::default(),
             },
             EnemyShip,
             FireClock { elapsed_ms: 0.0 },
-            SpriteFrames::new(frames, 150.0),
-            VisualMotion {
-                base_scale: Vec3::splat(3.0),
-                pulse: 0.0,
-                spin: 0.0,
-                phase: 1.5,
-            },
         ));
     }
 
@@ -1873,6 +1904,7 @@ fn animate_visual_motion(time: Res<Time>, mut query: Query<(&mut Transform, &mut
 
 fn collisions(
     mut commands: Commands,
+    assets: Res<ShooterAssets>,
     mut score: ResMut<Score>,
     flow: Res<GameFlow>,
     mut projectiles: Query<(Entity, &Position, &Projectile, Option<&mut HitTargets>)>,
@@ -1895,11 +1927,13 @@ fn collisions(
                     }
 
                     health.0 -= projectile.damage;
+                    spawn_hit_effect(&mut commands, &assets, *enemy_pos, ProjectileOwner::Player);
                     if !projectile.pierces {
                         commands.entity(projectile_entity).despawn();
                     }
                     if health.0 <= 0 {
                         commands.spawn((reward_drop_for_enemy(enemy.kind.as_str()), *enemy_pos));
+                        spawn_explosion(&mut commands, &assets, *enemy_pos, enemy.kind.as_str());
                         commands.entity(enemy_entity).despawn();
                         **score += 1;
                     }
@@ -1920,12 +1954,82 @@ fn collisions(
                 }
 
                 player_health.0 = (player_health.0 - projectile.damage).max(0);
+                spawn_hit_effect(&mut commands, &assets, *player_pos, ProjectileOwner::Enemy);
                 if !projectile.pierces {
                     commands.entity(projectile_entity).despawn();
                 }
             }
         }
     }
+}
+
+fn spawn_hit_effect(
+    commands: &mut Commands,
+    assets: &ShooterAssets,
+    position: Position,
+    owner: ProjectileOwner,
+) {
+    let mut sprite = Sprite::from_image(assets.hit_effect.clone());
+    sprite.color = match owner {
+        ProjectileOwner::Player => Color::srgba(1.0, 0.92, 0.38, 0.86),
+        ProjectileOwner::Enemy => Color::srgba(1.0, 0.32, 0.28, 0.88),
+    };
+    let scale = match owner {
+        ProjectileOwner::Player => 1.05,
+        ProjectileOwner::Enemy => 1.25,
+    };
+    commands.spawn((
+        sprite,
+        Transform {
+            translation: Vec3::new(position.x, position.y, 4.5),
+            scale: Vec3::splat(scale),
+            ..default()
+        },
+        HitEffect,
+        Lifetime {
+            elapsed_ms: 0.0,
+            duration_ms: 150.0,
+        },
+        VisualMotion {
+            base_scale: Vec3::splat(scale),
+            pulse: 0.2,
+            spin: 0.0,
+            phase: 0.0,
+        },
+    ));
+}
+
+fn spawn_explosion(
+    commands: &mut Commands,
+    assets: &ShooterAssets,
+    position: Position,
+    kind: &str,
+) {
+    let scale = match kind {
+        "boss" => 2.35,
+        "carrier" | "tank" => 1.85,
+        _ => 1.55,
+    };
+    commands.spawn((
+        Sprite::from_image(assets.explosion_frames[0].clone()),
+        Transform {
+            translation: Vec3::new(position.x, position.y, 4.8),
+            scale: Vec3::splat(scale),
+            ..default()
+        },
+        ExplosionEffect,
+        SpriteFrames::new(assets.explosion_frames.clone(), 55.0),
+        Lifetime {
+            elapsed_ms: 0.0,
+            duration_ms: assets.explosion_frames.len() as f32 * 55.0,
+        },
+        VisualMotion {
+            base_scale: Vec3::splat(scale),
+            pulse: 0.05,
+            spin: 0.0,
+            phase: 0.0,
+        },
+    ));
 }
 
 fn reward_drop_for_enemy(kind: &str) -> RewardItem {
@@ -2214,14 +2318,27 @@ mod tests {
         ShooterAssets {
             background: image.clone(),
             player_frames: vec![image.clone(), image.clone(), image.clone()],
-            enemy_red_frames: vec![image.clone(), image.clone(), image.clone()],
-            enemy_green_frames: vec![image.clone(), image.clone(), image.clone()],
-            enemy_yellow_frames: vec![image.clone(), image.clone(), image.clone()],
+            enemy_scout: image.clone(),
+            enemy_bomber: image.clone(),
+            enemy_weaver: image.clone(),
+            enemy_tank: image.clone(),
+            enemy_sniper: image.clone(),
+            enemy_carrier: image.clone(),
+            enemy_striker: image.clone(),
+            enemy_boss: image.clone(),
             bolt_frames: vec![image.clone(), image.clone()],
             laser_frames: vec![image.clone(), image.clone()],
             player_missile_frames: vec![image.clone(), image.clone()],
             enemy_missile_frames: vec![image.clone(), image.clone()],
-            shockwave_frames: vec![image],
+            shockwave_frames: vec![image.clone()],
+            hit_effect: image.clone(),
+            explosion_frames: vec![
+                image.clone(),
+                image.clone(),
+                image.clone(),
+                image.clone(),
+                image,
+            ],
         }
     }
 
@@ -2271,7 +2388,7 @@ mod tests {
     }
 
     #[test]
-    fn aircraft_visual_motion_does_not_scale_whole_sprite() {
+    fn player_and_enemy_bodies_do_not_receive_animation_components() {
         let mut app = App::new();
         app.insert_resource(test_shooter_assets())
             .add_systems(Update, attach_render_components);
@@ -2287,30 +2404,90 @@ mod tests {
 
         app.update();
 
-        let player_pulse = {
-            let mut player_motion = app
-                .world_mut()
-                .query_filtered::<&VisualMotion, With<PlayerShip>>();
-            player_motion
-                .single(app.world())
-                .expect("player ship")
-                .pulse
-        };
-        let enemy_pulse = {
-            let mut enemy_motion = app
-                .world_mut()
-                .query_filtered::<&VisualMotion, With<EnemyShip>>();
-            enemy_motion.single(app.world()).expect("enemy ship").pulse
-        };
+        let mut player_frames = app
+            .world_mut()
+            .query_filtered::<&SpriteFrames, With<PlayerShip>>();
+        assert_eq!(player_frames.iter(app.world()).count(), 0);
+        let mut enemy_frames = app
+            .world_mut()
+            .query_filtered::<&SpriteFrames, With<EnemyShip>>();
+        assert_eq!(enemy_frames.iter(app.world()).count(), 0);
 
-        assert_eq!(player_pulse, 0.0);
-        assert_eq!(enemy_pulse, 0.0);
+        let mut player_motion = app
+            .world_mut()
+            .query_filtered::<&VisualMotion, With<PlayerShip>>();
+        assert_eq!(player_motion.iter(app.world()).count(), 0);
+        let mut enemy_motion = app
+            .world_mut()
+            .query_filtered::<&VisualMotion, With<EnemyShip>>();
+        assert_eq!(enemy_motion.iter(app.world()).count(), 0);
+    }
+
+    #[test]
+    fn enemy_kinds_use_distinct_non_airplane_visual_assets() {
+        let kinds = [
+            "scout", "bomber", "weaver", "tank", "sniper", "carrier", "striker", "boss",
+        ];
+        let paths = kinds
+            .iter()
+            .map(|kind| enemy_asset_path_for_kind(kind))
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(paths.len(), kinds.len());
+        assert!(
+            paths
+                .iter()
+                .all(|path| path.starts_with("shooter/enemy_craft_"))
+        );
+    }
+
+    #[test]
+    fn non_boss_enemy_bodies_use_playable_sprite_sizes() {
+        let mut app = App::new();
+        app.insert_resource(test_shooter_assets())
+            .add_systems(Update, attach_render_components);
+
+        for (index, kind) in [
+            "scout", "bomber", "weaver", "tank", "sniper", "carrier", "striker", "boss",
+        ]
+        .iter()
+        .enumerate()
+        {
+            app.world_mut().spawn((
+                Enemy {
+                    kind: (*kind).to_string(),
+                },
+                Position {
+                    x: index as f32 * 20.0,
+                    y: 300.0,
+                },
+            ));
+        }
+
+        app.update();
+
+        let mut enemies = app
+            .world_mut()
+            .query_filtered::<(&Enemy, &Sprite, &Transform), With<EnemyShip>>();
+        for (enemy, sprite, transform) in enemies.iter(app.world()) {
+            let size = sprite
+                .custom_size
+                .expect("enemy body should clamp source art to a gameplay size");
+            let max_edge = size.x.max(size.y);
+            if enemy.kind == "boss" {
+                assert!(max_edge <= 160.0);
+            } else {
+                assert!(max_edge <= 115.0, "{} rendered too large", enemy.kind);
+            }
+            assert_eq!(transform.scale, Vec3::ONE);
+        }
     }
 
     #[test]
     fn collisions_system_accepts_disjoint_player_and_enemy_health_queries() {
         let mut app = App::new();
         app.insert_resource(Score(0))
+            .insert_resource(test_shooter_assets())
             .insert_resource(GameFlow::Running)
             .add_systems(Update, collisions);
 
@@ -2331,6 +2508,7 @@ mod tests {
     fn defeated_enemy_drops_reward_at_enemy_position() {
         let mut app = App::new();
         app.insert_resource(Score(0))
+            .insert_resource(test_shooter_assets())
             .insert_resource(GameFlow::Running)
             .add_systems(Update, collisions);
 
@@ -2369,6 +2547,7 @@ mod tests {
     fn enemy_projectile_damage_clamps_player_health_to_zero() {
         let mut app = App::new();
         app.insert_resource(Score(0))
+            .insert_resource(test_shooter_assets())
             .insert_resource(GameFlow::Running)
             .add_systems(Update, collisions);
 
@@ -2680,6 +2859,9 @@ true;
         assert!(asset_path.join("shooter/player_0.png").is_file());
         assert!(asset_path.join("shooter/shockwave_0.png").is_file());
         assert!(asset_path.join("shooter/background_nebula.png").is_file());
+        assert!(asset_path.join("shooter/enemy_craft_scout.png").is_file());
+        assert!(asset_path.join("shooter/hit_flash.png").is_file());
+        assert!(asset_path.join("shooter/explosion_0.png").is_file());
     }
 
     #[test]
@@ -2811,6 +2993,90 @@ true;
             .iter(app.world())
             .count();
         assert_eq!(reward_count, 0);
+    }
+
+    #[test]
+    fn player_and_enemy_hits_spawn_feedback_effects() {
+        let mut app = App::new();
+        app.insert_resource(Score(0))
+            .insert_resource(test_shooter_assets())
+            .insert_resource(GameFlow::Running)
+            .add_systems(Update, collisions);
+
+        app.world_mut()
+            .spawn((Player, Position { x: 0.0, y: 0.0 }, Health(30)));
+        app.world_mut().spawn((
+            Enemy {
+                kind: "scout".to_string(),
+            },
+            Position { x: 90.0, y: 0.0 },
+            Health(20),
+        ));
+        app.world_mut().spawn((
+            Position { x: 90.0, y: 0.0 },
+            Projectile {
+                owner: ProjectileOwner::Player,
+                damage: 4,
+                radius: 20.0,
+                pierces: false,
+            },
+        ));
+        app.world_mut().spawn((
+            Position { x: 0.0, y: 0.0 },
+            Projectile {
+                owner: ProjectileOwner::Enemy,
+                damage: 4,
+                radius: 20.0,
+                pierces: false,
+            },
+        ));
+
+        app.update();
+
+        let hit_effects = app
+            .world_mut()
+            .query::<&HitEffect>()
+            .iter(app.world())
+            .count();
+        assert_eq!(hit_effects, 2);
+    }
+
+    #[test]
+    fn defeated_enemy_spawns_explosion_animation() {
+        let mut app = App::new();
+        app.insert_resource(Score(0))
+            .insert_resource(test_shooter_assets())
+            .insert_resource(GameFlow::Running)
+            .add_systems(Update, collisions);
+
+        app.world_mut()
+            .spawn((Player, Position { x: 0.0, y: -360.0 }, Health(100)));
+        app.world_mut().spawn((
+            Enemy {
+                kind: "bomber".to_string(),
+            },
+            Position { x: 12.0, y: 140.0 },
+            Health(5),
+        ));
+        app.world_mut().spawn((
+            Position { x: 12.0, y: 140.0 },
+            Projectile {
+                owner: ProjectileOwner::Player,
+                damage: 8,
+                radius: 18.0,
+                pierces: false,
+            },
+        ));
+
+        app.update();
+
+        let (frames, lifetime) = app
+            .world_mut()
+            .query_filtered::<(&SpriteFrames, &Lifetime), With<ExplosionEffect>>()
+            .single(app.world())
+            .expect("enemy defeat should create an explosion animation");
+        assert!(frames.frames.len() >= 4);
+        assert!(lifetime.duration_ms > 250.0);
     }
 
     #[test]
