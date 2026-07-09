@@ -47,12 +47,13 @@ fn main() {
         return;
     }
 
+    let (window_width, window_height) = initial_window_resolution();
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.075, 0.085, 0.095)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "RustScript Gomoku".to_string(),
-                resolution: WindowResolution::new(860, 930),
+                resolution: WindowResolution::new(window_width, window_height),
                 resizable: true,
                 ..default()
             }),
@@ -62,6 +63,14 @@ fn main() {
         .add_systems(Startup, setup)
         .add_systems(EguiPrimaryContextPass, gomoku_ui)
         .run();
+}
+
+fn initial_window_resolution() -> (u32, u32) {
+    (720, 930)
+}
+
+fn centered_board_leading_space(available_width: f32, board_width: f32) -> f32 {
+    ((available_width - board_width) * 0.5).max(0.0)
 }
 
 fn setup(world: &mut World) {
@@ -159,9 +168,12 @@ fn gomoku_ui(world: &mut World) {
                 ui.add_space(10.0);
             });
 
-            ui.horizontal_centered(|ui| {
-                let board_side =
-                    (ui.available_width().min(ui.available_height()) - 12.0).max(320.0);
+            let available_width = ui.available_width();
+            let available_height = ui.available_height();
+            let board_side = (available_width.min(available_height) - 12.0).max(320.0);
+            let leading_space = centered_board_leading_space(available_width, board_side);
+            ui.horizontal(|ui| {
+                ui.add_space(leading_space);
                 clicked_move = draw_board(ui, &board, &state, board_side);
             });
         });
@@ -381,4 +393,26 @@ fn telemetry_text(state: &GomokuUiState) -> egui::RichText {
     ))
     .size(14.0)
     .color(egui::Color32::from_rgb(174, 184, 188))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_window_width_keeps_board_tight() {
+        let (width, _height) = initial_window_resolution();
+
+        assert!(width <= 740);
+    }
+
+    #[test]
+    fn centered_board_padding_balances_side_gaps() {
+        let available_width = 700.0;
+        let board_width = 640.0;
+        let left = centered_board_leading_space(available_width, board_width);
+        let right = available_width - board_width - left;
+
+        assert!((left - right).abs() < 0.01);
+    }
 }
