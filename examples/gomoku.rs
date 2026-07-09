@@ -1,3 +1,5 @@
+use std::{sync::mpsc, thread};
+
 use bevy::{
     prelude::*,
     window::{Window, WindowResolution},
@@ -8,13 +10,28 @@ use bevy_egui::{
 };
 use rustscript_bevy_gameplay::{
     GOMOKU_BOARD_SIZE, GomokuAiMove, GomokuBoard, GomokuMoveSummary, apply_gomoku_move_script,
-    choose_gomoku_ai_move, reset_gomoku_board,
+    choose_gomoku_ai_move, debug_gomoku_ai_script, debug_gomoku_move_script, reset_gomoku_board,
 };
+use script_editor::{DebugSession, EditorAction, LiveScriptEditor, ScriptTab};
+use vm::{DebugCommandBridge, Debugger};
+
+mod script_editor;
 
 const MOVE_SCRIPT: &str = include_str!("../scripts/gomoku_move.rss");
 const AI_SCRIPT: &str = include_str!("../scripts/gomoku_ai.rss");
 const HUMAN: i64 = 1;
 const COMPUTER: i64 = 2;
+const MOVE_TAB: usize = 0;
+const AI_TAB: usize = 1;
+const GOMOKU_MOVE_PREFIX: &str =
+    "let move_x: int = 0;\nlet move_y: int = 0;\nlet player: int = 1;\n";
+const GOMOKU_AI_PREFIX: &str = "let ai_player: int = 2;\n";
+const GOMOKU_HOST_APIS: &[&str] = &[
+    "bevy::Gomoku::cell",
+    "bevy::Gomoku::set_cell",
+    "bevy::Gomoku::set_result",
+    "bevy::Gomoku::set_ai_move",
+];
 
 #[derive(Resource, Clone)]
 struct GomokuUiState {
@@ -37,6 +54,31 @@ impl Default for GomokuUiState {
             jit_enabled: true,
             jit_trace_count: 0,
             last_ai_move_micros: None,
+        }
+    }
+}
+
+#[derive(Resource)]
+struct GomokuScripts {
+    editor: LiveScriptEditor,
+    debug_session: Option<DebugSession>,
+}
+
+impl Default for GomokuScripts {
+    fn default() -> Self {
+        let mut editor = LiveScriptEditor::new(vec![
+            ScriptTab::new(
+                "move.rss",
+                MOVE_SCRIPT,
+                GOMOKU_MOVE_PREFIX,
+                GOMOKU_HOST_APIS,
+            ),
+            ScriptTab::new("ai.rss", AI_SCRIPT, GOMOKU_AI_PREFIX, GOMOKU_HOST_APIS),
+        ]);
+        editor.lint_all();
+        Self {
+            editor,
+            debug_session: None,
         }
     }
 }
@@ -66,7 +108,7 @@ fn main() {
 }
 
 fn initial_window_resolution() -> (u32, u32) {
-    (720, 930)
+    (1320, 930)
 }
 
 fn centered_board_leading_space(available_width: f32, board_width: f32) -> f32 {
@@ -84,6 +126,7 @@ fn setup(world: &mut World) {
     ));
     reset_gomoku_board(world);
     world.insert_resource(GomokuUiState::default());
+    world.insert_resource(GomokuScripts::default());
 }
 
 fn run_script_smoke() {
@@ -142,8 +185,14 @@ fn run_script_smoke() {
 fn gomoku_ui(world: &mut World) {
     let board = world.resource::<GomokuBoard>().clone();
     let state = world.resource::<GomokuUiState>().clone();
+    let mut scripts = world.remove_resource::<GomokuScripts>().unwrap_or_default();
+    scripts.editor.update_auto_apply(std::time::Instant::now());
+    if let Some(session) = scripts.debug_session.as_ref() {
+        session.poll(&mut scripts.editor);
+    }
     let mut clicked_move = None;
     let mut restart = false;
+    let mut editor_actions = Vec::new();
 
     let mut system_state = bevy::ecs::system::SystemState::<EguiContexts>::new(world);
     let mut contexts = system_state.get_mut(world);
@@ -154,39 +203,63 @@ fn gomoku_ui(world: &mut World) {
     egui::CentralPanel::default()
         .frame(egui::Frame::new().fill(egui::Color32::from_rgb(18, 21, 24)))
         .show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(10.0);
-                ui.heading(egui::RichText::new("RustScript Gomoku").size(32.0));
-                ui.add_space(4.0);
-                ui.label(status_text(&state));
-                ui.add_space(3.0);
-                ui.label(telemetry_text(&state));
-                ui.add_space(12.0);
-                if ui.button("Restart").clicked() {
-                    restart = true;
-                }
-                ui.add_space(10.0);
-            });
-
-            let available_width = ui.available_width();
-            let available_height = ui.available_height();
-            let board_side = (available_width.min(available_height) - 12.0).max(320.0);
-            let leading_space = centered_board_leading_space(available_width, board_side);
             ui.horizontal(|ui| {
-                ui.add_space(leading_space);
-                clicked_move = draw_board(ui, &board, &state, board_side);
+                let editor_width = 520.0;
+                let gap = 14.0;
+                let board_area_width = (ui.available_width() - editor_width - gap).max(360.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(board_area_width, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Center),
+                    |ui| {
+                        ui.add_space(10.0);
+                        ui.heading(egui::RichText::new("RustScript Gomoku").size(32.0));
+                        ui.add_space(4.0);
+                        ui.label(status_text(&state));
+                        ui.add_space(3.0);
+                        ui.label(telemetry_text(&state));
+                        ui.add_space(12.0);
+                        if ui.button("Restart").clicked() {
+                            restart = true;
+                        }
+                        ui.add_space(10.0);
+
+                        let available_width = ui.available_width();
+                        let panel_height = ui.max_rect().height();
+                        let board_side =
+                            (available_width.min(panel_height - 170.0) - 12.0).max(560.0);
+                        let leading_space =
+                            centered_board_leading_space(available_width, board_side);
+                        ui.horizontal(|ui| {
+                            ui.add_space(leading_space);
+                            clicked_move = draw_board(ui, &board, &state, board_side);
+                        });
+                    },
+                );
+                ui.add_space(gap);
+                ui.separator();
+                ui.add_space(gap);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(editor_width, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        editor_actions = scripts.editor.ui(ui);
+                    },
+                );
             });
         });
 
     drop(contexts);
     system_state.apply(world);
+    handle_gomoku_editor_actions(world, &mut scripts, editor_actions);
 
     if restart {
         reset_gomoku_board(world);
         world.insert_resource(GomokuUiState::default());
+        world.insert_resource(scripts);
         return;
     }
 
+    world.insert_resource(scripts);
     if let Some((x, y)) = clicked_move {
         play_human_turn(world, x, y);
     }
@@ -295,8 +368,15 @@ fn play_human_turn(world: &mut World, x: i64, y: i64) {
     if state.winner != 0 || state.draw {
         return;
     }
+    let (move_script, ai_script) = {
+        let scripts = world.resource::<GomokuScripts>();
+        (
+            scripts.editor.active_source(MOVE_TAB).to_string(),
+            scripts.editor.active_source(AI_TAB).to_string(),
+        )
+    };
 
-    let human = match apply_gomoku_move_script(world, MOVE_SCRIPT, x, y, HUMAN) {
+    let human = match apply_gomoku_move_script(world, &move_script, x, y, HUMAN) {
         Ok(summary) => summary,
         Err(err) => {
             world.resource_mut::<GomokuUiState>().message = format!("Script error: {err}");
@@ -312,7 +392,7 @@ fn play_human_turn(world: &mut World, x: i64, y: i64) {
         return;
     }
 
-    let ai_move = match choose_gomoku_ai_move(world, AI_SCRIPT, COMPUTER) {
+    let ai_move = match choose_gomoku_ai_move(world, &ai_script, COMPUTER) {
         Ok(ai_move) => ai_move,
         Err(err) => {
             world.resource_mut::<GomokuUiState>().message = format!("AI script error: {err}");
@@ -320,7 +400,7 @@ fn play_human_turn(world: &mut World, x: i64, y: i64) {
         }
     };
     record_ai_telemetry(world, ai_move.telemetry);
-    let ai = match apply_gomoku_move_script(world, MOVE_SCRIPT, ai_move.x, ai_move.y, COMPUTER) {
+    let ai = match apply_gomoku_move_script(world, &move_script, ai_move.x, ai_move.y, COMPUTER) {
         Ok(summary) => summary,
         Err(err) => {
             world.resource_mut::<GomokuUiState>().message = format!("AI move error: {err}");
@@ -333,6 +413,91 @@ fn play_human_turn(world: &mut World, x: i64, y: i64) {
         return;
     }
     publish_move_state(world, ai, "AI moved", Some(ai_move));
+}
+
+fn handle_gomoku_editor_actions(
+    world: &mut World,
+    scripts: &mut GomokuScripts,
+    actions: Vec<EditorAction>,
+) {
+    for action in actions {
+        match action {
+            EditorAction::StartDebug(tab) => start_gomoku_debug_session(world, scripts, tab),
+            EditorAction::StepDebug => {
+                if let Some(session) = scripts.debug_session.as_ref() {
+                    session.command(&mut scripts.editor, "step");
+                }
+            }
+            EditorAction::NextDebug => {
+                if let Some(session) = scripts.debug_session.as_ref() {
+                    session.command(&mut scripts.editor, "next");
+                }
+            }
+            EditorAction::ContinueDebug => {
+                if let Some(session) = scripts.debug_session.as_ref() {
+                    session.command(&mut scripts.editor, "continue");
+                }
+            }
+            EditorAction::RefreshLocals => {
+                if let Some(session) = scripts.debug_session.as_ref() {
+                    session.command(&mut scripts.editor, "locals");
+                }
+            }
+        }
+    }
+}
+
+fn start_gomoku_debug_session(world: &mut World, scripts: &mut GomokuScripts, tab: usize) {
+    let source = scripts.editor.active_source(tab).to_string();
+    let board = world.resource::<GomokuBoard>().clone();
+    let (debug_x, debug_y) = first_open_gomoku_point(&board);
+    let bridge = DebugCommandBridge::new();
+    let thread_bridge = bridge.clone();
+    let (sender, receiver) = mpsc::channel::<String>();
+    thread::spawn(move || {
+        let mut debug_world = World::new();
+        debug_world.insert_resource(board);
+        let mut debugger = Debugger::with_command_bridge(thread_bridge);
+        debugger.stop_on_entry();
+        let result = if tab == MOVE_TAB {
+            debug_gomoku_move_script(
+                &mut debug_world,
+                &source,
+                debug_x,
+                debug_y,
+                HUMAN,
+                &mut debugger,
+            )
+            .map(|summary| {
+                format!(
+                    "debug complete: legal={}, winner={}, draw={}",
+                    summary.legal, summary.winner, summary.draw
+                )
+            })
+        } else {
+            debug_gomoku_ai_script(&mut debug_world, &source, COMPUTER, &mut debugger)
+                .map(|mv| format!("debug complete: ai=({}, {})", mv.x, mv.y))
+        };
+        let _ = sender.send(result.unwrap_or_else(|err| format!("debug error: {err}")));
+    });
+    scripts.editor.debug_output.clear();
+    scripts.editor.debug_line = None;
+    scripts.editor.debug_attached = false;
+    scripts.debug_session = Some(DebugSession::new(bridge, receiver));
+}
+
+fn first_open_gomoku_point(board: &GomokuBoard) -> (i64, i64) {
+    if board.cell(7, 7) == 0 {
+        return (7, 7);
+    }
+    for y in 0..GOMOKU_BOARD_SIZE {
+        for x in 0..GOMOKU_BOARD_SIZE {
+            if board.cell(x, y) == 0 {
+                return (x, y);
+            }
+        }
+    }
+    (7, 7)
 }
 
 fn record_ai_telemetry(
@@ -403,7 +568,7 @@ mod tests {
     fn initial_window_width_keeps_board_tight() {
         let (width, _height) = initial_window_resolution();
 
-        assert!(width <= 740);
+        assert_eq!(width, 1320);
     }
 
     #[test]

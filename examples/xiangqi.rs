@@ -1,3 +1,5 @@
+use std::{sync::mpsc, thread};
+
 use bevy::{
     prelude::*,
     window::{Window, WindowResolution},
@@ -8,13 +10,28 @@ use bevy_egui::{
 };
 use rustscript_bevy_gameplay::{
     XiangqiAiMove, XiangqiBoard, XiangqiMoveSummary, apply_xiangqi_move_script,
-    choose_xiangqi_ai_move, reset_xiangqi_board,
+    choose_xiangqi_ai_move, debug_xiangqi_ai_script, debug_xiangqi_move_script,
+    reset_xiangqi_board,
 };
+use script_editor::{DebugSession, EditorAction, LiveScriptEditor, ScriptTab};
+use vm::{DebugCommandBridge, Debugger};
+
+mod script_editor;
 
 const MOVE_SCRIPT: &str = include_str!("../scripts/xiangqi_move.rss");
 const AI_SCRIPT: &str = include_str!("../scripts/xiangqi_ai.rss");
 const RED: i64 = 1;
 const BLACK: i64 = -1;
+const MOVE_TAB: usize = 0;
+const AI_TAB: usize = 1;
+const XIANGQI_MOVE_PREFIX: &str = "let from_x: int = 4;\nlet from_y: int = 6;\nlet to_x: int = 4;\nlet to_y: int = 5;\nlet player: int = 1;\n";
+const XIANGQI_AI_PREFIX: &str = "let ai_player: int = -1;\n";
+const XIANGQI_HOST_APIS: &[&str] = &[
+    "bevy::Xiangqi::cell",
+    "bevy::Xiangqi::set_cell",
+    "bevy::Xiangqi::set_result",
+    "bevy::Xiangqi::set_ai_move",
+];
 
 #[derive(Resource, Clone)]
 struct XiangqiUiState {
@@ -39,6 +56,31 @@ impl Default for XiangqiUiState {
             jit_trace_count: 0,
             last_ai_move_micros: None,
             fonts_ready: false,
+        }
+    }
+}
+
+#[derive(Resource)]
+struct XiangqiScripts {
+    editor: LiveScriptEditor,
+    debug_session: Option<DebugSession>,
+}
+
+impl Default for XiangqiScripts {
+    fn default() -> Self {
+        let mut editor = LiveScriptEditor::new(vec![
+            ScriptTab::new(
+                "move.rss",
+                MOVE_SCRIPT,
+                XIANGQI_MOVE_PREFIX,
+                XIANGQI_HOST_APIS,
+            ),
+            ScriptTab::new("ai.rss", AI_SCRIPT, XIANGQI_AI_PREFIX, XIANGQI_HOST_APIS),
+        ]);
+        editor.lint_all();
+        Self {
+            editor,
+            debug_session: None,
         }
     }
 }
@@ -68,7 +110,7 @@ fn main() {
 }
 
 fn initial_window_resolution() -> (u32, u32) {
-    (720, 980)
+    (1320, 980)
 }
 
 fn centered_board_leading_space(available_width: f32, board_width: f32) -> f32 {
@@ -86,6 +128,7 @@ fn setup(world: &mut World) {
     ));
     reset_xiangqi_board(world);
     world.insert_resource(XiangqiUiState::default());
+    world.insert_resource(XiangqiScripts::default());
 }
 
 fn run_script_smoke() {
@@ -150,9 +193,17 @@ fn run_script_smoke() {
 fn xiangqi_ui(world: &mut World) {
     let board = world.resource::<XiangqiBoard>().clone();
     let state = world.resource::<XiangqiUiState>().clone();
+    let mut scripts = world
+        .remove_resource::<XiangqiScripts>()
+        .unwrap_or_default();
+    scripts.editor.update_auto_apply(std::time::Instant::now());
+    if let Some(session) = scripts.debug_session.as_ref() {
+        session.poll(&mut scripts.editor);
+    }
     let mut clicked = None;
     let mut restart = false;
     let mut installed_fonts = false;
+    let mut editor_actions = Vec::new();
 
     let mut system_state = bevy::ecs::system::SystemState::<EguiContexts>::new(world);
     let mut contexts = system_state.get_mut(world);
@@ -166,30 +217,48 @@ fn xiangqi_ui(world: &mut World) {
     egui::CentralPanel::default()
         .frame(egui::Frame::new().fill(egui::Color32::from_rgb(18, 20, 22)))
         .show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(10.0);
-                ui.heading(egui::RichText::new("RustScript Xiangqi").size(32.0));
-                ui.add_space(4.0);
-                ui.label(status_text(&state));
-                ui.add_space(3.0);
-                ui.label(telemetry_text(&state));
-                ui.add_space(8.0);
-                if ui.button("Restart").clicked() {
-                    restart = true;
-                }
-                ui.add_space(10.0);
-            });
-
-            let available_width = ui.available_width();
-            let available_height = ui.available_height();
-            let available_w = available_width - 12.0;
-            let available_h = available_height - 12.0;
-            let board_w = available_w.min(available_h * 8.0 / 9.0).max(360.0);
-            let board_h = board_w * 9.0 / 8.0;
-            let leading_space = centered_board_leading_space(available_width, board_w);
             ui.horizontal(|ui| {
-                ui.add_space(leading_space);
-                clicked = draw_board(ui, &board, &state, egui::vec2(board_w, board_h));
+                let editor_width = 520.0;
+                let gap = 14.0;
+                let board_area_width = (ui.available_width() - editor_width - gap).max(400.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(board_area_width, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Center),
+                    |ui| {
+                        ui.add_space(10.0);
+                        ui.heading(egui::RichText::new("RustScript Xiangqi").size(32.0));
+                        ui.add_space(4.0);
+                        ui.label(status_text(&state));
+                        ui.add_space(3.0);
+                        ui.label(telemetry_text(&state));
+                        ui.add_space(8.0);
+                        if ui.button("Restart").clicked() {
+                            restart = true;
+                        }
+                        ui.add_space(10.0);
+
+                        let available_width = ui.available_width();
+                        let available_w = available_width - 12.0;
+                        let available_h = (ui.max_rect().height() - 170.0).max(620.0);
+                        let board_w = available_w.min(available_h * 8.0 / 9.0).max(360.0);
+                        let board_h = board_w * 9.0 / 8.0;
+                        let leading_space = centered_board_leading_space(available_width, board_w);
+                        ui.horizontal(|ui| {
+                            ui.add_space(leading_space);
+                            clicked = draw_board(ui, &board, &state, egui::vec2(board_w, board_h));
+                        });
+                    },
+                );
+                ui.add_space(gap);
+                ui.separator();
+                ui.add_space(gap);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(editor_width, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        editor_actions = scripts.editor.ui(ui);
+                    },
+                );
             });
         });
 
@@ -199,13 +268,16 @@ fn xiangqi_ui(world: &mut World) {
     if installed_fonts {
         world.resource_mut::<XiangqiUiState>().fonts_ready = true;
     }
+    handle_xiangqi_editor_actions(world, &mut scripts, editor_actions);
 
     if restart {
         reset_xiangqi_board(world);
         world.insert_resource(XiangqiUiState::default());
+        world.insert_resource(scripts);
         return;
     }
 
+    world.insert_resource(scripts);
     if let Some((x, y)) = clicked {
         handle_click(world, x, y);
     }
@@ -419,15 +491,22 @@ fn handle_click(world: &mut World, x: i64, y: i64) {
 }
 
 fn play_human_turn(world: &mut World, from_x: i64, from_y: i64, to_x: i64, to_y: i64) {
-    let human = match apply_xiangqi_move_script(world, MOVE_SCRIPT, from_x, from_y, to_x, to_y, RED)
-    {
-        Ok(summary) => summary,
-        Err(err) => {
-            let mut state = world.resource_mut::<XiangqiUiState>();
-            state.message = format!("Script error: {err}");
-            return;
-        }
+    let (move_script, ai_script) = {
+        let scripts = world.resource::<XiangqiScripts>();
+        (
+            scripts.editor.active_source(MOVE_TAB).to_string(),
+            scripts.editor.active_source(AI_TAB).to_string(),
+        )
     };
+    let human =
+        match apply_xiangqi_move_script(world, &move_script, from_x, from_y, to_x, to_y, RED) {
+            Ok(summary) => summary,
+            Err(err) => {
+                let mut state = world.resource_mut::<XiangqiUiState>();
+                state.message = format!("Script error: {err}");
+                return;
+            }
+        };
     if !human.legal {
         let mut state = world.resource_mut::<XiangqiUiState>();
         state.message = "Illegal move".to_string();
@@ -439,7 +518,7 @@ fn play_human_turn(world: &mut World, from_x: i64, from_y: i64, to_x: i64, to_y:
         return;
     }
 
-    let ai_move = match choose_xiangqi_ai_move(world, AI_SCRIPT, BLACK) {
+    let ai_move = match choose_xiangqi_ai_move(world, &ai_script, BLACK) {
         Ok(ai_move) => ai_move,
         Err(err) => {
             let mut state = world.resource_mut::<XiangqiUiState>();
@@ -450,7 +529,7 @@ fn play_human_turn(world: &mut World, from_x: i64, from_y: i64, to_x: i64, to_y:
     record_ai_telemetry(world, ai_move.telemetry);
     let ai = match apply_xiangqi_move_script(
         world,
-        MOVE_SCRIPT,
+        &move_script,
         ai_move.from_x,
         ai_move.from_y,
         ai_move.to_x,
@@ -472,6 +551,73 @@ fn play_human_turn(world: &mut World, from_x: i64, from_y: i64, to_x: i64, to_y:
     }
     world.resource_mut::<XiangqiUiState>().last_ai_move = Some(ai_move);
     publish_move_state(world, ai, "Red to move");
+}
+
+fn handle_xiangqi_editor_actions(
+    world: &mut World,
+    scripts: &mut XiangqiScripts,
+    actions: Vec<EditorAction>,
+) {
+    for action in actions {
+        match action {
+            EditorAction::StartDebug(tab) => start_xiangqi_debug_session(world, scripts, tab),
+            EditorAction::StepDebug => {
+                if let Some(session) = scripts.debug_session.as_ref() {
+                    session.command(&mut scripts.editor, "step");
+                }
+            }
+            EditorAction::NextDebug => {
+                if let Some(session) = scripts.debug_session.as_ref() {
+                    session.command(&mut scripts.editor, "next");
+                }
+            }
+            EditorAction::ContinueDebug => {
+                if let Some(session) = scripts.debug_session.as_ref() {
+                    session.command(&mut scripts.editor, "continue");
+                }
+            }
+            EditorAction::RefreshLocals => {
+                if let Some(session) = scripts.debug_session.as_ref() {
+                    session.command(&mut scripts.editor, "locals");
+                }
+            }
+        }
+    }
+}
+
+fn start_xiangqi_debug_session(world: &mut World, scripts: &mut XiangqiScripts, tab: usize) {
+    let source = scripts.editor.active_source(tab).to_string();
+    let board = world.resource::<XiangqiBoard>().clone();
+    let bridge = DebugCommandBridge::new();
+    let thread_bridge = bridge.clone();
+    let (sender, receiver) = mpsc::channel::<String>();
+    thread::spawn(move || {
+        let mut debug_world = World::new();
+        debug_world.insert_resource(board);
+        let mut debugger = Debugger::with_command_bridge(thread_bridge);
+        debugger.stop_on_entry();
+        let result = if tab == MOVE_TAB {
+            debug_xiangqi_move_script(&mut debug_world, &source, 4, 6, 4, 5, RED, &mut debugger)
+                .map(|summary| {
+                    format!(
+                        "debug complete: legal={}, winner={}",
+                        summary.legal, summary.winner
+                    )
+                })
+        } else {
+            debug_xiangqi_ai_script(&mut debug_world, &source, BLACK, &mut debugger).map(|mv| {
+                format!(
+                    "debug complete: ai=({}, {}) -> ({}, {})",
+                    mv.from_x, mv.from_y, mv.to_x, mv.to_y
+                )
+            })
+        };
+        let _ = sender.send(result.unwrap_or_else(|err| format!("debug error: {err}")));
+    });
+    scripts.editor.debug_output.clear();
+    scripts.editor.debug_line = None;
+    scripts.editor.debug_attached = false;
+    scripts.debug_session = Some(DebugSession::new(bridge, receiver));
 }
 
 fn publish_move_state(world: &mut World, summary: XiangqiMoveSummary, message: &str) {
@@ -559,7 +705,7 @@ mod tests {
     fn initial_window_width_keeps_board_tight() {
         let (width, _height) = initial_window_resolution();
 
-        assert!(width <= 740);
+        assert_eq!(width, 1320);
     }
 
     #[test]

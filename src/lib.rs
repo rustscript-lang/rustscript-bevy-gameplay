@@ -2,7 +2,10 @@ use std::{cell::RefCell, time::Instant};
 
 use bevy_ecs::prelude::*;
 pub(crate) use vm::Vm;
-use vm::{CallOutcome, CallReturn, JitConfig, Value, VmError, VmResult, VmStatus, compile_source};
+use vm::{
+    CallOutcome, CallReturn, Debugger, JitConfig, Value, VmError, VmResult, VmStatus,
+    compile_source,
+};
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Health(pub i64);
@@ -389,6 +392,54 @@ pub fn choose_gomoku_ai_move(
     Ok(GomokuAiMove { x, y, telemetry })
 }
 
+pub fn debug_gomoku_move_script(
+    world: &mut World,
+    source: &str,
+    x: i64,
+    y: i64,
+    player: i64,
+    debugger: &mut Debugger,
+) -> Result<GomokuMoveSummary, String> {
+    ensure_gomoku_resources(world);
+    world.insert_resource(GomokuScriptState::default());
+    let wrapped = format!(
+        "let move_x: int = {x};\nlet move_y: int = {y};\nlet player: int = {player};\n{source}"
+    );
+    let (_value, telemetry) = with_gomoku_context(world, || {
+        run_gomoku_script_with_debugger(&wrapped, debugger)
+    })?;
+    let state = *world
+        .get_resource::<GomokuScriptState>()
+        .ok_or_else(|| "gomoku script did not publish a result".to_string())?;
+    Ok(GomokuMoveSummary {
+        legal: state.legal,
+        winner: state.winner,
+        draw: state.draw,
+        telemetry,
+    })
+}
+
+pub fn debug_gomoku_ai_script(
+    world: &mut World,
+    source: &str,
+    ai_player: i64,
+    debugger: &mut Debugger,
+) -> Result<GomokuAiMove, String> {
+    ensure_gomoku_resources(world);
+    world.insert_resource(GomokuScriptState::default());
+    let wrapped = format!("let ai_player: int = {ai_player};\n{source}");
+    let (_value, telemetry) = with_gomoku_context(world, || {
+        run_gomoku_script_with_debugger(&wrapped, debugger)
+    })?;
+    let state = *world
+        .get_resource::<GomokuScriptState>()
+        .ok_or_else(|| "gomoku script did not publish an AI move".to_string())?;
+    let (x, y) = state
+        .ai_move
+        .ok_or_else(|| "gomoku AI script did not select a move".to_string())?;
+    Ok(GomokuAiMove { x, y, telemetry })
+}
+
 pub fn reset_xiangqi_board(world: &mut World) {
     if let Some(mut board) = world.get_resource_mut::<XiangqiBoard>() {
         board.reset();
@@ -432,6 +483,61 @@ pub fn choose_xiangqi_ai_move(
     world.insert_resource(XiangqiScriptState::default());
     let wrapped = format!("let ai_player: int = {ai_player};\n{source}");
     let (_value, telemetry) = with_xiangqi_context(world, || run_xiangqi_script(&wrapped, true))?;
+    let state = *world
+        .get_resource::<XiangqiScriptState>()
+        .ok_or_else(|| "xiangqi script did not publish an AI move".to_string())?;
+    let (from_x, from_y, to_x, to_y) = state
+        .ai_move
+        .ok_or_else(|| "xiangqi AI script did not select a move".to_string())?;
+    Ok(XiangqiAiMove {
+        from_x,
+        from_y,
+        to_x,
+        to_y,
+        telemetry,
+    })
+}
+
+pub fn debug_xiangqi_move_script(
+    world: &mut World,
+    source: &str,
+    from_x: i64,
+    from_y: i64,
+    to_x: i64,
+    to_y: i64,
+    player: i64,
+    debugger: &mut Debugger,
+) -> Result<XiangqiMoveSummary, String> {
+    ensure_xiangqi_resources(world);
+    world.insert_resource(XiangqiScriptState::default());
+    let wrapped = format!(
+        "let from_x: int = {from_x};\nlet from_y: int = {from_y};\nlet to_x: int = {to_x};\nlet to_y: int = {to_y};\nlet player: int = {player};\n{source}"
+    );
+    let (_value, telemetry) = with_xiangqi_context(world, || {
+        run_xiangqi_script_with_debugger(&wrapped, debugger)
+    })?;
+    let state = *world
+        .get_resource::<XiangqiScriptState>()
+        .ok_or_else(|| "xiangqi script did not publish a result".to_string())?;
+    Ok(XiangqiMoveSummary {
+        legal: state.legal,
+        winner: state.winner,
+        telemetry,
+    })
+}
+
+pub fn debug_xiangqi_ai_script(
+    world: &mut World,
+    source: &str,
+    ai_player: i64,
+    debugger: &mut Debugger,
+) -> Result<XiangqiAiMove, String> {
+    ensure_xiangqi_resources(world);
+    world.insert_resource(XiangqiScriptState::default());
+    let wrapped = format!("let ai_player: int = {ai_player};\n{source}");
+    let (_value, telemetry) = with_xiangqi_context(world, || {
+        run_xiangqi_script_with_debugger(&wrapped, debugger)
+    })?;
     let state = *world
         .get_resource::<XiangqiScriptState>()
         .ok_or_else(|| "xiangqi script did not publish an AI move".to_string())?;
@@ -876,6 +982,35 @@ fn run_gomoku_script(source: &str) -> Result<(Value, GomokuScriptTelemetry), Str
     ))
 }
 
+fn run_gomoku_script_with_debugger(
+    source: &str,
+    debugger: &mut Debugger,
+) -> Result<(Value, GomokuScriptTelemetry), String> {
+    let started = Instant::now();
+    let compiled = compile_source(source).map_err(|err| err.to_string())?;
+    let mut vm = Vm::new(compiled.program);
+    bind_gomoku_hosts(&mut vm);
+    let status = vm
+        .run_with_debugger(debugger)
+        .map_err(|err| err.to_string())?;
+    if status != VmStatus::Halted {
+        return Err(format!("script did not halt: {status:?}"));
+    }
+    let value = vm
+        .stack()
+        .last()
+        .cloned()
+        .ok_or_else(|| "script returned an empty stack".to_string())?;
+    Ok((
+        value,
+        GomokuScriptTelemetry {
+            jit_enabled: false,
+            jit_trace_count: 0,
+            elapsed_micros: started.elapsed().as_micros(),
+        },
+    ))
+}
+
 fn run_xiangqi_script(
     source: &str,
     enable_jit: bool,
@@ -903,6 +1038,35 @@ fn run_xiangqi_script(
         XiangqiScriptTelemetry {
             jit_enabled: jit_snapshot.config.enabled,
             jit_trace_count: jit_snapshot.traces.len(),
+            elapsed_micros: started.elapsed().as_micros(),
+        },
+    ))
+}
+
+fn run_xiangqi_script_with_debugger(
+    source: &str,
+    debugger: &mut Debugger,
+) -> Result<(Value, XiangqiScriptTelemetry), String> {
+    let started = Instant::now();
+    let compiled = compile_source(source).map_err(|err| err.to_string())?;
+    let mut vm = Vm::new(compiled.program);
+    bind_xiangqi_hosts(&mut vm);
+    let status = vm
+        .run_with_debugger(debugger)
+        .map_err(|err| err.to_string())?;
+    if status != VmStatus::Halted {
+        return Err(format!("script did not halt: {status:?}"));
+    }
+    let value = vm
+        .stack()
+        .last()
+        .cloned()
+        .ok_or_else(|| "script returned an empty stack".to_string())?;
+    Ok((
+        value,
+        XiangqiScriptTelemetry {
+            jit_enabled: false,
+            jit_trace_count: 0,
             elapsed_micros: started.elapsed().as_micros(),
         },
     ))
