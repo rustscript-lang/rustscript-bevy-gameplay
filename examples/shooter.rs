@@ -1,5 +1,7 @@
 use bevy::{
+    asset::RenderAssetUsages,
     camera::{OrthographicProjection, Projection, ScalingMode},
+    image::{CompressedImageFormats, ImageSampler, ImageType},
     prelude::*,
 };
 use bevy_egui::{
@@ -25,45 +27,6 @@ const GAMEPLAY_VIEW_WIDTH: u32 = 720;
 const GAMEPLAY_VIEW_HEIGHT: u32 = 1180;
 const GAMEPLAY_WORLD_PADDING_X: f32 = 220.0;
 const GAMEPLAY_WORLD_PADDING_Y: f32 = 220.0;
-
-fn shooter_asset_file_path() -> String {
-    let manifest_assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
-    let current_exe = std::env::current_exe().ok();
-    let current_dir = std::env::current_dir().ok();
-    resolve_shooter_asset_file_path(
-        current_exe.as_deref(),
-        current_dir.as_deref(),
-        &manifest_assets,
-    )
-    .to_string_lossy()
-    .to_string()
-}
-
-fn resolve_shooter_asset_file_path(
-    current_exe: Option<&std::path::Path>,
-    current_dir: Option<&std::path::Path>,
-    manifest_assets: &std::path::Path,
-) -> std::path::PathBuf {
-    let mut candidates = Vec::new();
-    if let Some(exe_dir) = current_exe.and_then(std::path::Path::parent) {
-        candidates.push(exe_dir.join("assets"));
-    }
-    if let Some(cwd) = current_dir {
-        candidates.push(cwd.join("assets"));
-    }
-    candidates.push(manifest_assets.to_path_buf());
-
-    candidates
-        .into_iter()
-        .find(|path| shooter_asset_dir_has_required_files(path))
-        .unwrap_or_else(|| manifest_assets.to_path_buf())
-}
-
-fn shooter_asset_dir_has_required_files(path: &std::path::Path) -> bool {
-    path.join("shooter/background_nebula.png").is_file()
-        && path.join("shooter/player_0.png").is_file()
-        && path.join("shooter/enemy_craft_scout.png").is_file()
-}
 
 fn gameplay_camera_transform() -> Transform {
     Transform::from_xyz((LEFT + RIGHT) * 0.5, (TOP + BOTTOM) * 0.5, 0.0)
@@ -99,21 +62,14 @@ fn main() {
     }
 
     App::new()
-        .add_plugins(
-            DefaultPlugins
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "RustScript Bevy Shooter".to_string(),
-                        resolution: default_window_size().into(),
-                        ..default()
-                    }),
-                    ..default()
-                })
-                .set(AssetPlugin {
-                    file_path: shooter_asset_file_path(),
-                    ..default()
-                }),
-        )
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "RustScript Bevy Shooter".to_string(),
+                resolution: default_window_size().into(),
+                ..default()
+            }),
+            ..default()
+        }))
         .add_plugins(EguiPlugin::default())
         .insert_resource(ClearColor(Color::srgb(0.055, 0.085, 0.14)))
         .insert_resource(Score(0))
@@ -690,44 +646,189 @@ struct ShooterAssets {
     explosion_frames: Vec<Handle<Image>>,
 }
 
+struct EmbeddedImage {
+    path: &'static str,
+    bytes: &'static [u8],
+}
+
+const EMBEDDED_SHOOTER_IMAGES: &[EmbeddedImage] = &[
+    EmbeddedImage {
+        path: "shooter/background_nebula.png",
+        bytes: include_bytes!("../assets/shooter/background_nebula.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/player_0.png",
+        bytes: include_bytes!("../assets/shooter/player_0.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/player_1.png",
+        bytes: include_bytes!("../assets/shooter/player_1.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/player_2.png",
+        bytes: include_bytes!("../assets/shooter/player_2.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/enemy_craft_scout.png",
+        bytes: include_bytes!("../assets/shooter/enemy_craft_scout.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/enemy_craft_bomber.png",
+        bytes: include_bytes!("../assets/shooter/enemy_craft_bomber.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/enemy_craft_weaver.png",
+        bytes: include_bytes!("../assets/shooter/enemy_craft_weaver.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/enemy_craft_tank.png",
+        bytes: include_bytes!("../assets/shooter/enemy_craft_tank.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/enemy_craft_sniper.png",
+        bytes: include_bytes!("../assets/shooter/enemy_craft_sniper.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/enemy_craft_carrier.png",
+        bytes: include_bytes!("../assets/shooter/enemy_craft_carrier.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/enemy_craft_striker.png",
+        bytes: include_bytes!("../assets/shooter/enemy_craft_striker.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/enemy_craft_boss.png",
+        bytes: include_bytes!("../assets/shooter/enemy_craft_boss.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/bolt_0.png",
+        bytes: include_bytes!("../assets/shooter/bolt_0.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/bolt_1.png",
+        bytes: include_bytes!("../assets/shooter/bolt_1.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/laser_0.png",
+        bytes: include_bytes!("../assets/shooter/laser_0.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/laser_1.png",
+        bytes: include_bytes!("../assets/shooter/laser_1.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/missile_player_0.png",
+        bytes: include_bytes!("../assets/shooter/missile_player_0.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/missile_player_1.png",
+        bytes: include_bytes!("../assets/shooter/missile_player_1.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/missile_enemy_0.png",
+        bytes: include_bytes!("../assets/shooter/missile_enemy_0.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/missile_enemy_1.png",
+        bytes: include_bytes!("../assets/shooter/missile_enemy_1.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/shockwave_0.png",
+        bytes: include_bytes!("../assets/shooter/shockwave_0.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/shockwave_1.png",
+        bytes: include_bytes!("../assets/shooter/shockwave_1.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/shockwave_2.png",
+        bytes: include_bytes!("../assets/shooter/shockwave_2.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/shockwave_3.png",
+        bytes: include_bytes!("../assets/shooter/shockwave_3.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/shockwave_4.png",
+        bytes: include_bytes!("../assets/shooter/shockwave_4.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/hit_flash.png",
+        bytes: include_bytes!("../assets/shooter/hit_flash.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/explosion_0.png",
+        bytes: include_bytes!("../assets/shooter/explosion_0.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/explosion_1.png",
+        bytes: include_bytes!("../assets/shooter/explosion_1.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/explosion_2.png",
+        bytes: include_bytes!("../assets/shooter/explosion_2.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/explosion_3.png",
+        bytes: include_bytes!("../assets/shooter/explosion_3.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/explosion_4.png",
+        bytes: include_bytes!("../assets/shooter/explosion_4.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/explosion_5.png",
+        bytes: include_bytes!("../assets/shooter/explosion_5.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/explosion_6.png",
+        bytes: include_bytes!("../assets/shooter/explosion_6.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/explosion_7.png",
+        bytes: include_bytes!("../assets/shooter/explosion_7.png"),
+    },
+    EmbeddedImage {
+        path: "shooter/explosion_8.png",
+        bytes: include_bytes!("../assets/shooter/explosion_8.png"),
+    },
+];
+
 impl ShooterAssets {
-    fn load(asset_server: &AssetServer) -> Self {
+    fn load(images: &mut Assets<Image>) -> Self {
         Self {
-            background: asset_server.load("shooter/background_nebula.png"),
+            background: load_embedded_image(images, "shooter/background_nebula.png"),
             player_frames: load_images(
-                asset_server,
+                images,
                 &[
                     "shooter/player_0.png",
                     "shooter/player_1.png",
                     "shooter/player_2.png",
                 ],
             ),
-            enemy_scout: asset_server.load(enemy_asset_path_for_kind("scout")),
-            enemy_bomber: asset_server.load(enemy_asset_path_for_kind("bomber")),
-            enemy_weaver: asset_server.load(enemy_asset_path_for_kind("weaver")),
-            enemy_tank: asset_server.load(enemy_asset_path_for_kind("tank")),
-            enemy_sniper: asset_server.load(enemy_asset_path_for_kind("sniper")),
-            enemy_carrier: asset_server.load(enemy_asset_path_for_kind("carrier")),
-            enemy_striker: asset_server.load(enemy_asset_path_for_kind("striker")),
-            enemy_boss: asset_server.load(enemy_asset_path_for_kind("boss")),
-            bolt_frames: load_images(asset_server, &["shooter/bolt_0.png", "shooter/bolt_1.png"]),
-            laser_frames: load_images(
-                asset_server,
-                &["shooter/laser_0.png", "shooter/laser_1.png"],
-            ),
+            enemy_scout: load_embedded_image(images, enemy_asset_path_for_kind("scout")),
+            enemy_bomber: load_embedded_image(images, enemy_asset_path_for_kind("bomber")),
+            enemy_weaver: load_embedded_image(images, enemy_asset_path_for_kind("weaver")),
+            enemy_tank: load_embedded_image(images, enemy_asset_path_for_kind("tank")),
+            enemy_sniper: load_embedded_image(images, enemy_asset_path_for_kind("sniper")),
+            enemy_carrier: load_embedded_image(images, enemy_asset_path_for_kind("carrier")),
+            enemy_striker: load_embedded_image(images, enemy_asset_path_for_kind("striker")),
+            enemy_boss: load_embedded_image(images, enemy_asset_path_for_kind("boss")),
+            bolt_frames: load_images(images, &["shooter/bolt_0.png", "shooter/bolt_1.png"]),
+            laser_frames: load_images(images, &["shooter/laser_0.png", "shooter/laser_1.png"]),
             player_missile_frames: load_images(
-                asset_server,
+                images,
                 &[
                     "shooter/missile_player_0.png",
                     "shooter/missile_player_1.png",
                 ],
             ),
             enemy_missile_frames: load_images(
-                asset_server,
+                images,
                 &["shooter/missile_enemy_0.png", "shooter/missile_enemy_1.png"],
             ),
             shockwave_frames: load_images(
-                asset_server,
+                images,
                 &[
                     "shooter/shockwave_0.png",
                     "shooter/shockwave_1.png",
@@ -736,9 +837,9 @@ impl ShooterAssets {
                     "shooter/shockwave_4.png",
                 ],
             ),
-            hit_effect: asset_server.load("shooter/hit_flash.png"),
+            hit_effect: load_embedded_image(images, "shooter/hit_flash.png"),
             explosion_frames: load_images(
-                asset_server,
+                images,
                 &[
                     "shooter/explosion_0.png",
                     "shooter/explosion_1.png",
@@ -768,8 +869,33 @@ impl ShooterAssets {
     }
 }
 
-fn load_images(asset_server: &AssetServer, paths: &[&'static str]) -> Vec<Handle<Image>> {
-    paths.iter().map(|path| asset_server.load(*path)).collect()
+fn load_images(images: &mut Assets<Image>, paths: &[&'static str]) -> Vec<Handle<Image>> {
+    paths
+        .iter()
+        .map(|path| load_embedded_image(images, path))
+        .collect()
+}
+
+fn load_embedded_image(images: &mut Assets<Image>, path: &str) -> Handle<Image> {
+    let bytes = embedded_image_bytes(path)
+        .unwrap_or_else(|| panic!("missing embedded shooter image registration: {path}"));
+    let image = Image::from_buffer(
+        bytes,
+        ImageType::Extension("png"),
+        CompressedImageFormats::NONE,
+        true,
+        ImageSampler::Default,
+        RenderAssetUsages::default(),
+    )
+    .unwrap_or_else(|err| panic!("failed to decode embedded shooter image {path}: {err}"));
+    images.add(image)
+}
+
+fn embedded_image_bytes(path: &str) -> Option<&'static [u8]> {
+    EMBEDDED_SHOOTER_IMAGES
+        .iter()
+        .find(|image| image.path == path)
+        .map(|image| image.bytes)
 }
 
 fn enemy_asset_path_for_kind(kind: &str) -> &'static str {
@@ -961,10 +1087,10 @@ type ScriptManagedEnemyPositionQuery<'w, 's> =
 fn setup(
     mut commands: Commands,
     mut egui_global_settings: ResMut<EguiGlobalSettings>,
-    asset_server: Res<AssetServer>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     egui_global_settings.auto_create_primary_context = false;
-    let assets = ShooterAssets::load(&asset_server);
+    let assets = ShooterAssets::load(&mut images);
 
     commands.spawn((
         PrimaryEguiContext,
@@ -3109,36 +3235,52 @@ true;
     }
 
     #[test]
-    fn shooter_asset_file_path_points_at_repo_assets() {
-        let asset_path = std::path::PathBuf::from(shooter_asset_file_path());
-        assert!(asset_path.join("shooter/player_0.png").is_file());
-        assert!(asset_path.join("shooter/shockwave_0.png").is_file());
-        assert!(asset_path.join("shooter/background_nebula.png").is_file());
-        assert!(asset_path.join("shooter/enemy_craft_scout.png").is_file());
-        assert!(asset_path.join("shooter/hit_flash.png").is_file());
-        assert!(asset_path.join("shooter/explosion_0.png").is_file());
-    }
+    fn shooter_runtime_images_are_embedded_in_binary() {
+        let required_paths = [
+            "shooter/background_nebula.png",
+            "shooter/player_0.png",
+            "shooter/player_1.png",
+            "shooter/player_2.png",
+            "shooter/bolt_0.png",
+            "shooter/bolt_1.png",
+            "shooter/laser_0.png",
+            "shooter/laser_1.png",
+            "shooter/missile_player_0.png",
+            "shooter/missile_player_1.png",
+            "shooter/missile_enemy_0.png",
+            "shooter/missile_enemy_1.png",
+            "shooter/shockwave_0.png",
+            "shooter/shockwave_1.png",
+            "shooter/shockwave_2.png",
+            "shooter/shockwave_3.png",
+            "shooter/shockwave_4.png",
+            "shooter/hit_flash.png",
+            "shooter/explosion_0.png",
+            "shooter/explosion_1.png",
+            "shooter/explosion_2.png",
+            "shooter/explosion_3.png",
+            "shooter/explosion_4.png",
+            "shooter/explosion_5.png",
+            "shooter/explosion_6.png",
+            "shooter/explosion_7.png",
+            "shooter/explosion_8.png",
+        ];
 
-    #[test]
-    fn shooter_asset_path_prefers_packaged_assets_next_to_exe() {
-        let temp_root =
-            std::env::temp_dir().join(format!("rustscript_shooter_assets_{}", std::process::id()));
-        let exe_dir = temp_root.join("package");
-        let packaged_shooter_dir = exe_dir.join("assets").join("shooter");
-        std::fs::create_dir_all(&packaged_shooter_dir).unwrap();
-        std::fs::write(packaged_shooter_dir.join("background_nebula.png"), b"png").unwrap();
-        std::fs::write(packaged_shooter_dir.join("player_0.png"), b"png").unwrap();
-        std::fs::write(packaged_shooter_dir.join("enemy_craft_scout.png"), b"png").unwrap();
-        let exe = exe_dir.join(format!("shooter{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&exe, b"exe").unwrap();
-        let cwd = temp_root.join("cwd");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let manifest_assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+        for path in required_paths {
+            let bytes = embedded_image_bytes(path).unwrap_or_else(|| {
+                panic!("shooter image should be embedded for runtime path {path}")
+            });
+            assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        }
 
-        let resolved = resolve_shooter_asset_file_path(Some(&exe), Some(&cwd), &manifest_assets);
-
-        assert_eq!(resolved, exe_dir.join("assets"));
-        std::fs::remove_dir_all(temp_root).unwrap();
+        for kind in [
+            "scout", "bomber", "weaver", "tank", "sniper", "carrier", "striker", "boss",
+        ] {
+            assert!(
+                embedded_image_bytes(enemy_asset_path_for_kind(kind)).is_some(),
+                "enemy asset should be embedded for kind {kind}"
+            );
+        }
     }
 
     #[test]

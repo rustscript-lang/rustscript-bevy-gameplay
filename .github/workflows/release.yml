@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to upload assets to"
+        description: "Release tag to upload files to"
         required: true
         type: string
 
@@ -109,10 +109,11 @@ jobs:
           for extra in ("README.md", "LICENSE"):
               shutil.copy2(root / extra, package_dir / extra)
 
-          shutil.copytree(root / "assets", package_dir / "assets")
-
           with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
               for path in package_dir.rglob("*"):
+                  relative = path.relative_to(package_dir)
+                  if relative.parts[0] in {"assets", "scripts"}:
+                      raise RuntimeError(f"release package should not include external resource directory: {relative}")
                   zf.write(path, path.relative_to(package_dir.parent))
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
