@@ -1,4 +1,38 @@
-use std::process::Command;
+use std::{
+    fs,
+    path::PathBuf,
+    process::{Command, Output},
+};
+
+fn run_script_smoke_from_empty_cwd(example: &str) -> Output {
+    let cwd = std::env::temp_dir().join(format!(
+        "rustscript_{example}_script_smoke_{}",
+        std::process::id()
+    ));
+    if cwd.exists() {
+        fs::remove_dir_all(&cwd).expect("old smoke cwd should be removable");
+    }
+    fs::create_dir_all(&cwd).expect("smoke cwd should be created");
+
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let output = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()))
+        .args([
+            "run",
+            "--quiet",
+            "--manifest-path",
+            manifest.to_str().expect("manifest path should be UTF-8"),
+            "--example",
+            example,
+            "--",
+            "--script-smoke",
+        ])
+        .current_dir(&cwd)
+        .output()
+        .expect("example smoke should launch");
+
+    fs::remove_dir_all(&cwd).expect("smoke cwd should be removable");
+    output
+}
 
 #[test]
 fn combat_example_runs_end_to_end() {
@@ -25,18 +59,7 @@ fn combat_example_runs_end_to_end() {
 
 #[test]
 fn shooter_example_script_smoke_runs_end_to_end() {
-    let output = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()))
-        .args([
-            "run",
-            "--quiet",
-            "--example",
-            "shooter",
-            "--",
-            "--script-smoke",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("shooter example smoke should launch");
+    let output = run_script_smoke_from_empty_cwd("shooter");
 
     assert!(
         output.status.success(),
@@ -57,18 +80,7 @@ fn shooter_example_script_smoke_runs_end_to_end() {
 
 #[test]
 fn gomoku_example_script_smoke_runs_end_to_end() {
-    let output = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()))
-        .args([
-            "run",
-            "--quiet",
-            "--example",
-            "gomoku",
-            "--",
-            "--script-smoke",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("gomoku example smoke should launch");
+    let output = run_script_smoke_from_empty_cwd("gomoku");
 
     assert!(
         output.status.success(),
@@ -101,18 +113,7 @@ fn gomoku_example_script_smoke_runs_end_to_end() {
 
 #[test]
 fn xiangqi_example_script_smoke_runs_end_to_end() {
-    let output = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()))
-        .args([
-            "run",
-            "--quiet",
-            "--example",
-            "xiangqi",
-            "--",
-            "--script-smoke",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("xiangqi example smoke should launch");
+    let output = run_script_smoke_from_empty_cwd("xiangqi");
 
     assert!(
         output.status.success(),
