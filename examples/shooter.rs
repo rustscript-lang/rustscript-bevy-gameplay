@@ -1,5 +1,11 @@
-use bevy::{camera::Viewport, prelude::*, window::PrimaryWindow};
-use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
+use bevy::{
+    camera::{Viewport, visibility::RenderLayers},
+    prelude::*,
+    window::PrimaryWindow,
+};
+use bevy_egui::{
+    EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui,
+};
 use rustscript_bevy_gameplay::{
     AttackCooldownMs, AttackPower, AttackStyle, Enemy, Health, Player, Position,
     ScriptManagedEnemy, Velocity, apply_shooter_script,
@@ -111,8 +117,20 @@ type MovingProjectileQuery<'w, 's> =
 type ScriptManagedEnemyPositionQuery<'w, 's> =
     Query<'w, 's, (Entity, &'static Position), (With<Enemy>, With<ScriptManagedEnemy>)>;
 
-fn setup(mut commands: Commands) {
+fn setup(mut commands: Commands, mut egui_global_settings: ResMut<EguiGlobalSettings>) {
+    egui_global_settings.auto_create_primary_context = false;
+
     commands.spawn((Camera2d, GameCamera));
+    commands.spawn((
+        PrimaryEguiContext,
+        Camera2d,
+        RenderLayers::none(),
+        Camera {
+            order: 1,
+            clear_color: ClearColorConfig::None,
+            ..default()
+        },
+    ));
     commands.spawn((
         Sprite::from_color(Color::srgb(0.05, 0.08, 0.14), Vec2::ONE),
         Transform {
@@ -485,5 +503,31 @@ mod tests {
             gameplay_viewport_size(UVec2::new(1180, 720), SCRIPT_PANEL_WIDTH, 1.0),
             UVec2::new(750, 720)
         );
+    }
+
+    #[test]
+    fn setup_uses_separate_cameras_for_gameplay_and_egui() {
+        let mut app = App::new();
+        app.insert_resource(EguiGlobalSettings::default())
+            .add_systems(Startup, setup);
+        app.update();
+
+        assert!(
+            !app.world()
+                .resource::<EguiGlobalSettings>()
+                .auto_create_primary_context
+        );
+
+        let mut game_cameras = app.world_mut().query_filtered::<Entity, With<GameCamera>>();
+        assert_eq!(game_cameras.iter(app.world()).count(), 1);
+
+        let mut egui_cameras = app
+            .world_mut()
+            .query_filtered::<&Camera, (With<PrimaryEguiContext>, Without<GameCamera>)>();
+        let egui_camera = egui_cameras
+            .single(app.world())
+            .expect("egui should render through its own camera");
+        assert_eq!(egui_camera.order, 1);
+        assert!(egui_camera.viewport.is_none());
     }
 }
