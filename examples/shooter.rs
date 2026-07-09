@@ -330,9 +330,9 @@ fn collisions(
     mut commands: Commands,
     mut score: ResMut<Score>,
     player_bullets: Query<(Entity, &Position, &PlayerBullet)>,
-    mut enemies: Query<(Entity, &Position, &mut Health), With<Enemy>>,
+    mut enemies: Query<(Entity, &Position, &mut Health), (With<Enemy>, Without<Player>)>,
     enemy_bullets: Query<(Entity, &Position, &EnemyBullet)>,
-    mut players: Query<(&Position, &mut Health), With<Player>>,
+    mut players: Query<(&Position, &mut Health), (With<Player>, Without<Enemy>)>,
 ) {
     for (bullet_entity, bullet_pos, bullet) in &player_bullets {
         for (enemy_entity, enemy_pos, mut health) in &mut enemies {
@@ -421,4 +421,30 @@ fn script_panel(
             }
         });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collisions_system_accepts_disjoint_player_and_enemy_health_queries() {
+        let mut app = App::new();
+        app.insert_resource(Score(0)).add_systems(Update, collisions);
+
+        app.world_mut().spawn((
+            Player,
+            Position { x: 0.0, y: 0.0 },
+            Health(100),
+        ));
+        app.world_mut().spawn((
+            Enemy {
+                kind: "grunt".to_string(),
+            },
+            Position { x: 50.0, y: 0.0 },
+            Health(30),
+        ));
+
+        app.update();
+    }
 }
