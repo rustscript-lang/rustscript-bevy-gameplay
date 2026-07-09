@@ -4009,6 +4009,7 @@ dependencies = [
  "bevy",
  "bevy_ecs",
  "bevy_egui",
+ "fontdb",
  "pd-host-function",
  "pd-vm",
  "pretty_assertions",

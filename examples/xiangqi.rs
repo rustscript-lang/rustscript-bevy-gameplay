@@ -672,21 +672,16 @@ fn telemetry_text(state: &XiangqiUiState) -> egui::RichText {
 }
 
 fn install_cjk_font(ctx: &egui::Context) -> bool {
-    let font_paths = [
-        "C:\\Windows\\Fonts\\msyh.ttc",
-        "C:\\Windows\\Fonts\\msyh.ttf",
-        "C:\\Windows\\Fonts\\simsun.ttc",
-        "C:\\Windows\\Fonts\\simhei.ttf",
-    ];
-    let Some(bytes) = font_paths.iter().find_map(|path| std::fs::read(path).ok()) else {
+    let Some((bytes, face_index)) = load_system_cjk_font() else {
         return false;
     };
 
     let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        "xiangqi_cjk".to_string(),
-        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-    );
+    let mut font_data = egui::FontData::from_owned(bytes);
+    font_data.index = face_index;
+    fonts
+        .font_data
+        .insert("xiangqi_cjk".to_string(), std::sync::Arc::new(font_data));
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         fonts
             .families
@@ -696,6 +691,61 @@ fn install_cjk_font(ctx: &egui::Context) -> bool {
     }
     ctx.set_fonts(fonts);
     true
+}
+
+fn load_system_cjk_font() -> Option<(Vec<u8>, u32)> {
+    let mut database = fontdb::Database::new();
+    database.load_system_fonts();
+
+    for name in cjk_font_family_candidates() {
+        let families = [fontdb::Family::Name(name)];
+        let query = fontdb::Query {
+            families: &families,
+            ..fontdb::Query::default()
+        };
+        if let Some(id) = database.query(&query) {
+            return database.with_face_data(id, |data, face_index| (data.to_vec(), face_index));
+        }
+    }
+
+    for face in database.faces() {
+        if face.families.iter().any(|(family, _)| {
+            cjk_font_family_candidates()
+                .iter()
+                .any(|candidate| family.eq_ignore_ascii_case(candidate))
+        }) {
+            return database
+                .with_face_data(face.id, |data, face_index| (data.to_vec(), face_index));
+        }
+    }
+
+    None
+}
+
+fn cjk_font_family_candidates() -> &'static [&'static str] {
+    &[
+        "Microsoft YaHei UI",
+        "Microsoft YaHei",
+        "SimSun",
+        "SimHei",
+        "DengXian",
+        "Microsoft JhengHei UI",
+        "Microsoft JhengHei",
+        "PingFang SC",
+        "Heiti SC",
+        "Songti SC",
+        "STHeiti",
+        "Hiragino Sans GB",
+        "Noto Sans CJK SC",
+        "Noto Sans SC",
+        "Noto Serif CJK SC",
+        "Source Han Sans SC",
+        "Source Han Serif SC",
+        "WenQuanYi Micro Hei",
+        "WenQuanYi Zen Hei",
+        "AR PL UMing CN",
+        "Droid Sans Fallback",
+    ]
 }
 
 #[cfg(test)]
@@ -717,5 +767,16 @@ mod tests {
         let right = available_width - board_width - left;
 
         assert!((left - right).abs() < 0.01);
+    }
+
+    #[test]
+    fn cjk_font_candidates_cover_common_desktop_platforms() {
+        let candidates = cjk_font_family_candidates();
+
+        assert!(candidates.contains(&"Microsoft YaHei"));
+        assert!(candidates.contains(&"PingFang SC"));
+        assert!(candidates.contains(&"Noto Sans CJK SC"));
+        assert!(candidates.contains(&"WenQuanYi Micro Hei"));
+        assert!(candidates.iter().all(|name| !name.contains('\\')));
     }
 }
