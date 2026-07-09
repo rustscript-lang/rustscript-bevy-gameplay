@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use bevy_ecs::prelude::*;
 pub(crate) use vm::Vm;
-use vm::{CallOutcome, CallReturn, Value, VmError, VmResult, VmStatus, compile_source};
+use vm::{CallOutcome, CallReturn, JitConfig, Value, VmError, VmResult, VmStatus, compile_source};
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Health(pub i64);
@@ -67,6 +67,13 @@ pub struct ShooterSummary {
     pub player_projectile_count: i64,
     pub enemies_spawned: usize,
     pub rewards_spawned: usize,
+    pub jit: ShooterJitSummary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShooterJitSummary {
+    pub enabled: bool,
+    pub trace_count: usize,
 }
 
 #[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
@@ -146,8 +153,8 @@ pub fn apply_scripted_damage(
 pub fn apply_shooter_script(world: &mut World, source: &str) -> Result<ShooterSummary, String> {
     compile_source(source).map_err(|err| err.to_string())?;
     world.insert_resource(ShooterSpawnRules::default());
-    with_shooter_context(world, || run_shooter_value(source))?;
-    summarize_shooter_world(world)
+    let (_, jit) = with_shooter_context(world, || run_shooter_script(source))?;
+    summarize_shooter_world(world, jit)
 }
 
 pub fn tick_shooter_spawn_rules(
@@ -230,7 +237,10 @@ impl ShooterSpawnTrigger {
     }
 }
 
-fn summarize_shooter_world(world: &mut World) -> Result<ShooterSummary, String> {
+fn summarize_shooter_world(
+    world: &mut World,
+    jit: ShooterJitSummary,
+) -> Result<ShooterSummary, String> {
     let (
         player_health,
         player_attack_style,
@@ -270,6 +280,7 @@ fn summarize_shooter_world(world: &mut World) -> Result<ShooterSummary, String> 
         player_projectile_count,
         enemies_spawned,
         rewards_spawned,
+        jit,
     })
 }
 
@@ -458,18 +469,35 @@ fn run_value(source: &str) -> Result<Value, String> {
         .ok_or_else(|| "script returned an empty stack".to_string())
 }
 
-fn run_shooter_value(source: &str) -> Result<Value, String> {
+fn shooter_jit_config() -> JitConfig {
+    JitConfig {
+        enabled: true,
+        hot_loop_threshold: 1,
+        max_trace_len: 512,
+    }
+}
+
+fn run_shooter_script(source: &str) -> Result<(Value, ShooterJitSummary), String> {
     let compiled = compile_source(source).map_err(|err| err.to_string())?;
-    let mut vm = Vm::new(compiled.program);
+    let mut vm = Vm::new_with_jit_config(compiled.program, shooter_jit_config());
     bind_shooter_hosts(&mut vm);
     let status = vm.run().map_err(|err| err.to_string())?;
     if status != VmStatus::Halted {
         return Err(format!("script did not halt: {status:?}"));
     }
-    vm.stack()
+    let value = vm
+        .stack()
         .last()
         .cloned()
-        .ok_or_else(|| "script returned an empty stack".to_string())
+        .ok_or_else(|| "script returned an empty stack".to_string())?;
+    let jit_snapshot = vm.jit_snapshot();
+    Ok((
+        value,
+        ShooterJitSummary {
+            enabled: jit_snapshot.config.enabled,
+            trace_count: jit_snapshot.traces.len(),
+        },
+    ))
 }
 
 fn bind_bevy_hosts(vm: &mut Vm) {

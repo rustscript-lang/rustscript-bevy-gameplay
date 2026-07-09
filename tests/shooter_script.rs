@@ -20,6 +20,7 @@ fn rustscript_spawns_player_and_enemy_waves() {
     assert_eq!(summary.player_projectile_count, 1);
     assert_eq!(summary.enemies_spawned, 7);
     assert_eq!(summary.rewards_spawned, 2);
+    assert!(summary.jit.enabled);
 
     let (_, health, style, power, loadout) = world
         .query::<(
@@ -215,11 +216,34 @@ true;
 
     assert_eq!(summary.enemies_spawned, 0);
     assert_eq!(summary.rewards_spawned, 0);
+    assert!(summary.jit.enabled);
     let rules = world
         .get_resource::<ShooterSpawnRules>()
         .expect("script should install spawn rules");
     assert_eq!(rules.enemies.len(), 2);
     assert_eq!(rules.rewards.len(), 1);
+}
+
+#[test]
+fn shooter_script_reports_jit_trace_count_for_hot_loops() {
+    let mut world = World::new();
+    let source = r#"
+use bevy;
+let hp: bool = bevy::Shooter::set_player_health(95);
+let mut i: int = 0;
+while i < 20 {
+    i = i + 1;
+}
+true;
+"#;
+
+    let summary = apply_shooter_script(&mut world, source).expect("script should apply");
+
+    assert!(summary.jit.enabled);
+    assert!(
+        summary.jit.trace_count > 0,
+        "hot loop script should produce at least one JIT trace"
+    );
 }
 
 #[test]

@@ -93,6 +93,8 @@ fn main() {
             diagnostics: Vec::new(),
             pending_save: true,
             pending_restart: false,
+            jit_enabled: true,
+            jit_trace_count: 0,
         })
         .add_systems(Startup, setup)
         .add_systems(EguiPrimaryContextPass, script_panel)
@@ -131,7 +133,7 @@ fn run_script_smoke() {
         .map(|rules| (rules.enemies.len(), rules.rewards.len()))
         .unwrap_or((0, 0));
     println!(
-        "player_hp={}, attack={}:{}, projectiles={}:{}, enemies={}, rewards={}, enemy_rules={}, reward_rules={}",
+        "player_hp={}, attack={}:{}, projectiles={}:{}, enemies={}, rewards={}, enemy_rules={}, reward_rules={}, jit_enabled={}, jit_traces={}",
         summary.player_health,
         summary.player_attack_style,
         summary.player_attack_power,
@@ -140,7 +142,9 @@ fn run_script_smoke() {
         summary.enemies_spawned,
         summary.rewards_spawned,
         enemy_rules,
-        reward_rules
+        reward_rules,
+        summary.jit.enabled,
+        summary.jit.trace_count
     );
 }
 
@@ -151,6 +155,8 @@ struct ScriptEditor {
     diagnostics: Vec<ScriptDiagnostic>,
     pending_save: bool,
     pending_restart: bool,
+    jit_enabled: bool,
+    jit_trace_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -985,6 +991,8 @@ fn apply_pending_script(world: &mut World) {
         Ok(summary) => {
             let verb = if restart { "Restarted" } else { "Applied live" };
             editor.diagnostics.clear();
+            editor.jit_enabled = summary.jit.enabled;
+            editor.jit_trace_count = summary.jit.trace_count;
             editor.status = format!(
                 "{verb}: hp {}, attack {} / power {}, enemies {}",
                 summary.player_health,
@@ -2174,6 +2182,11 @@ fn despawn_out_of_bounds(
     }
 }
 
+fn jit_status_label(enabled: bool, trace_count: usize) -> String {
+    let state = if enabled { "on" } else { "off" };
+    format!("JIT: {state}   traces: {trace_count}")
+}
+
 fn script_panel(
     mut contexts: EguiContexts,
     mut editor: ResMut<ScriptEditor>,
@@ -2283,6 +2296,7 @@ fn script_panel(
                 enemies.iter().count(),
                 **score
             ));
+            ui.label(jit_status_label(editor.jit_enabled, editor.jit_trace_count));
             ui.label(&editor.status);
             ui.separator();
             let diagnostics = editor.diagnostics.clone();
@@ -2385,6 +2399,12 @@ mod tests {
             "let hp: bool = bevy::Shooter::set_player_health(95"
         );
         assert!(diagnostic.message.contains("expected"));
+    }
+
+    #[test]
+    fn jit_status_label_shows_trace_count() {
+        assert_eq!(jit_status_label(true, 3), "JIT: on   traces: 3");
+        assert_eq!(jit_status_label(false, 0), "JIT: off   traces: 0");
     }
 
     #[test]
@@ -2727,6 +2747,8 @@ true;
                 diagnostics: Vec::new(),
                 pending_save: true,
                 pending_restart: false,
+                jit_enabled: true,
+                jit_trace_count: 0,
             });
         app.world_mut().spawn((
             Player,
