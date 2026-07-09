@@ -40,22 +40,26 @@ fn rustscript_spawns_player_and_enemy_waves() {
     let mut enemy_query = world.query::<(&Enemy, &Health, &AttackStyle, &AttackPower, &Position)>();
     let enemies = enemy_query.iter(&world).collect::<Vec<_>>();
     assert_eq!(enemies.len(), 7);
-    assert!(enemies.iter().all(|(_, _, _, power, _)| power.0 <= 6));
+    assert!(enemies.iter().all(|(_, _, _, power, _)| power.0 <= 4));
     assert!(enemies.iter().any(|(enemy, health, style, _, position)| {
-        enemy.kind == "bomber" && health.0 == 42 && style.0 == "burst" && position.y == 450.0
+        enemy.kind == "bomber" && health.0 == 30 && style.0 == "burst" && position.y == 450.0
     }));
     assert!(enemies.iter().any(|(enemy, health, style, _, position)| {
-        enemy.kind == "sniper" && health.0 == 36 && style.0 == "rail" && position.y == 390.0
+        enemy.kind == "sniper" && health.0 == 24 && style.0 == "rail" && position.y == 390.0
     }));
     assert!(
         enemies
             .iter()
-            .any(|(enemy, _, style, _, _)| enemy.kind == "carrier" && style.0 == "burst")
+            .any(|(enemy, health, style, _, _)| enemy.kind == "carrier"
+                && health.0 == 55
+                && style.0 == "burst")
     );
     assert!(
         enemies
             .iter()
-            .any(|(enemy, _, style, _, _)| enemy.kind == "striker" && style.0 == "flak")
+            .any(|(enemy, health, style, _, _)| enemy.kind == "striker"
+                && health.0 == 18
+                && style.0 == "flak")
     );
 
     let mut rewards = world.query::<(&RewardItem, &Position)>();
