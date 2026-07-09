@@ -1,7 +1,16 @@
-fn bevy_armor() -> int;
-fn damage_floor(damage) -> int;
+use bevy;
 
-let raw = incoming - bevy_armor();
-let crit_bonus = if critical => { raw } else => { 0 };
-let damage = raw + crit_bonus;
-damage_floor(damage);
+let exists: bool = bevy::World::contains_entity();
+let applied = if exists => {
+    let armor: int = bevy::World::get_armor();
+    let current_health: int = bevy::World::get_health();
+    let raw = incoming - armor;
+    let crit_bonus = if critical => { raw } else => { 0 };
+    let damage = raw + crit_bonus;
+    let applied_damage = if damage < 1 => { 1 } else => { damage };
+    let written: bool = bevy::World::set_health(current_health - applied_damage);
+    applied_damage
+} else => {
+    0
+};
+applied;

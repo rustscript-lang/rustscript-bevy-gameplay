@@ -3,7 +3,7 @@ use pretty_assertions::assert_eq;
 use rustscript_bevy_gameplay::{Armor, DamageRules, Health, apply_scripted_damage};
 
 #[test]
-fn rustscript_damage_formula_calls_bevy_component_host_function() {
+fn rustscript_damage_formula_reads_and_writes_bevy_world() {
     let mut world = World::new();
     world.insert_resource(
         DamageRules::from_source(include_str!("../scripts/damage_formula.rss"))
@@ -19,7 +19,7 @@ fn rustscript_damage_formula_calls_bevy_component_host_function() {
 }
 
 #[test]
-fn rustscript_keeps_bevy_component_host_function_in_critical_formula() {
+fn rustscript_keeps_bevy_world_write_in_critical_formula() {
     let mut world = World::new();
     world.insert_resource(
         DamageRules::from_source(include_str!("../scripts/damage_formula.rss"))
@@ -34,18 +34,19 @@ fn rustscript_keeps_bevy_component_host_function_in_critical_formula() {
 }
 
 #[test]
-fn rustscript_can_call_bevy_armor_from_inline_formula() {
+fn rustscript_inline_formula_uses_bevy_namespace_hosts() {
     let mut world = World::new();
     world.insert_resource(
         DamageRules::from_source(
             r#"
-fn bevy_armor() -> int;
-fn damage_floor(damage) -> int;
-
-let raw = incoming - bevy_armor();
+use bevy;
+let armor: int = bevy::World::get_armor();
+let current_health: int = bevy::World::get_health();
+let raw = incoming - armor;
 let crit_bonus = if critical => { raw } else => { 0 };
-let damage = raw + crit_bonus;
-damage_floor(damage);
+let applied = raw + crit_bonus;
+let updated: bool = bevy::World::set_health(current_health - applied);
+applied;
 "#,
         )
         .expect("rules should compile"),

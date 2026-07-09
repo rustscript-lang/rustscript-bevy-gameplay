@@ -755,6 +755,7 @@ name = "rustscript-bevy-gameplay"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "pd-host-function",
  "pd-vm",
  "pretty_assertions",
 ]
