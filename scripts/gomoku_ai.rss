@@ -1,124 +1,225 @@
 use bevy;
 
+fn abs_int(value: int) -> int {
+    if value < 0 => { -value } else => { value }
+}
+
+fn has_neighbor(x: int, y: int, size: int) -> bool {
+    let mut found = false;
+    let mut dy = -2;
+    while !found && dy <= 2 {
+        let mut dx = -2;
+        while !found && dx <= 2 {
+            let px = x + dx;
+            let py = y + dy;
+            if px >= 0 && px < size && py >= 0 && py < size &&
+                (dx != 0 || dy != 0) && bevy::Gomoku::cell(px, py) != 0 {
+                found = true;
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    found
+}
+
+// Scores windows through the newly placed point using Rapfi-style threat classes.
+fn threat_score(x: int, y: int, stone: int) -> int {
+    let mut five = 0;
+    let mut fours = 0;
+    let mut threes = 0;
+    let mut twos = 0;
+    let mut direction = 0;
+    while direction < 4 {
+        let dx = if direction == 0 => { 1 } else => {
+            if direction == 1 => { 0 } else => { 1 }
+        };
+        let dy = if direction == 0 => { 0 } else => {
+            if direction == 1 => { 1 } else => {
+                if direction == 2 => { 1 } else => { -1 }
+            }
+        };
+        let mut direction_four = 0;
+        let mut direction_three = 0;
+        let mut direction_two = 0;
+        let mut start = -4;
+        while start <= 0 {
+            let mut own = 0;
+            let mut empty = 0;
+            let mut blocked = false;
+            let mut step = 0;
+            while step < 5 {
+                let cell: int = bevy::Gomoku::cell(x + (start + step) * dx, y + (start + step) * dy);
+                if cell == stone {
+                    own = own + 1;
+                } else {
+                    if cell == 0 {
+                        empty = empty + 1;
+                    } else {
+                        blocked = true;
+                    }
+                }
+                step = step + 1;
+            }
+            if !blocked {
+                if own == 5 {
+                    five = five + 1;
+                } else {
+                    if own == 4 && empty == 1 {
+                        direction_four = direction_four + 1;
+                    } else {
+                        if own == 3 && empty == 2 {
+                            direction_three = direction_three + 1;
+                        } else {
+                            if own == 2 && empty == 3 {
+                                direction_two = direction_two + 1;
+                            }
+                        }
+                    }
+                }
+            }
+            start = start + 1;
+        }
+        if direction_four > 0 {
+            fours = fours + direction_four;
+        }
+        if direction_three > 0 {
+            threes = threes + 1;
+        }
+        if direction_two > 0 {
+            twos = twos + 1;
+        }
+        direction = direction + 1;
+    }
+
+    let mut score = fours * 22000 + threes * 1800 + twos * 120;
+    if five > 0 {
+        score = 10000000;
+    } else {
+        if fours >= 2 {
+            score = score + 1000000;
+        }
+        if fours >= 1 && threes >= 1 {
+            score = score + 500000;
+        }
+        if threes >= 2 {
+            score = score + 90000;
+        }
+    }
+    score
+}
+
+fn strongest_reply(player: int, size: int) -> int {
+    let mut best = 0;
+    let mut y = 0;
+    while y < size {
+        let mut x = 0;
+        while x < size {
+            if bevy::Gomoku::cell(x, y) == 0 && has_neighbor(x, y, size) {
+                bevy::Gomoku::set_cell(x, y, player);
+                let score = threat_score(x, y, player);
+                bevy::Gomoku::set_cell(x, y, 0);
+                if score > best {
+                    best = score;
+                }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    best
+}
+
 let size: int = bevy::Gomoku::board_size();
 let opponent: int = if ai_player == 1 => { 2 } else => { 1 };
 let center: int = size / 2;
 let mut best_x: int = -1;
 let mut best_y: int = -1;
-let mut best_score: int = -1;
-
-let mut scan_y: int = 0;
-while scan_y < size {
-    let mut scan_x: int = 0;
-    while scan_x < size {
-        let empty: bool = bevy::Gomoku::cell(scan_x, scan_y) == 0;
-        let considered: bool = if empty => {
-            let diff_x: int = if scan_x > center => {
-                scan_x - center
-            } else => {
-                center - scan_x
-            };
-            let diff_y: int = if scan_y > center => {
-                scan_y - center
-            } else => {
-                center - scan_y
-            };
-            let mut score: int = 30 - diff_x - diff_y;
-
-            let mut dir: int = 0;
-            while dir < 4 {
-                let dx: int = if dir == 0 => {
-                    1
-                } else => {
-                    if dir == 1 => {
-                        0
-                    } else => {
-                        1
-                    }
-                };
-                let dy: int = if dir == 0 => {
-                    0
-                } else => {
-                    if dir == 1 => {
-                        1
-                    } else => {
-                        if dir == 2 => {
-                            1
-                        } else => {
-                            -1
-                        }
-                    }
-                };
-
-                let mut own_total: int = 1;
-                let mut x: int = scan_x + dx;
-                let mut y: int = scan_y + dy;
-                while bevy::Gomoku::cell(x, y) == ai_player {
-                    own_total = own_total + 1;
-                    x = x + dx;
-                    y = y + dy;
-                }
-                x = scan_x - dx;
-                y = scan_y - dy;
-                while bevy::Gomoku::cell(x, y) == ai_player {
-                    own_total = own_total + 1;
-                    x = x - dx;
-                    y = y - dy;
-                }
-
-                let mut enemy_total: int = 1;
-                x = scan_x + dx;
-                y = scan_y + dy;
-                while bevy::Gomoku::cell(x, y) == opponent {
-                    enemy_total = enemy_total + 1;
-                    x = x + dx;
-                    y = y + dy;
-                }
-                x = scan_x - dx;
-                y = scan_y - dy;
-                while bevy::Gomoku::cell(x, y) == opponent {
-                    enemy_total = enemy_total + 1;
-                    x = x - dx;
-                    y = y - dy;
-                }
-
-                let own_bonus: int = if own_total >= 5 => {
-                    100000
-                } else => {
-                    own_total * own_total * 120
-                };
-                let block_bonus: int = if enemy_total >= 5 => {
-                    90000
-                } else => {
-                    enemy_total * enemy_total * 95
-                };
-                score = score + own_bonus + block_bonus;
-                dir = dir + 1;
-            }
-
-            let selected: bool = if score > best_score => {
-                best_score = score;
-                best_x = scan_x;
-                best_y = scan_y;
-                true
-            } else => {
-                false
-            };
-            true
-        } else => {
-            false
-        };
-        scan_x = scan_x + 1;
+let mut best_score: int = -2000000000;
+let mut top_x: [int] = [-1, -1, -1, -1, -1, -1];
+let mut top_y: [int] = [-1, -1, -1, -1, -1, -1];
+let mut top_score: [int] = [-2000000000, -2000000000, -2000000000, -2000000000, -2000000000, -2000000000];
+let mut stones: int = 0;
+let mut count_y: int = 0;
+while count_y < size {
+    let mut count_x = 0;
+    while count_x < size {
+        if bevy::Gomoku::cell(count_x, count_y) != 0 {
+            stones = stones + 1;
+        }
+        count_x = count_x + 1;
     }
-    scan_y = scan_y + 1;
+    count_y = count_y + 1;
 }
 
-let fallback: bool = if best_x < 0 => {
+if stones == 0 {
     best_x = center;
     best_y = center;
-    true
-} else => {
-    false
-};
-let published: bool = bevy::Gomoku::set_ai_move(best_x, best_y);
+} else {
+    let mut y = 0;
+    while y < size {
+        let mut x = 0;
+        while x < size {
+            if bevy::Gomoku::cell(x, y) == 0 && has_neighbor(x, y, size) {
+                bevy::Gomoku::set_cell(x, y, ai_player);
+                let attack = threat_score(x, y, ai_player);
+                bevy::Gomoku::set_cell(x, y, 0);
+
+                bevy::Gomoku::set_cell(x, y, opponent);
+                let defense = threat_score(x, y, opponent);
+                bevy::Gomoku::set_cell(x, y, 0);
+
+                let distance = abs_int(x - center) + abs_int(y - center);
+                let mut score = attack * 2 + defense * 3 - distance;
+                if attack >= 10000000 {
+                    score = 1900000000 - distance;
+                } else {
+                    if defense >= 10000000 {
+                        score = 1800000000 - distance;
+                    }
+                }
+
+                let mut insert = 0;
+                while insert < 6 && score <= top_score[insert].copy() {
+                    insert = insert + 1;
+                }
+                if insert < 6 {
+                    let mut shift = 5;
+                    while shift > insert {
+                        top_score[shift] = top_score[shift - 1].copy();
+                        top_x[shift] = top_x[shift - 1].copy();
+                        top_y[shift] = top_y[shift - 1].copy();
+                        shift = shift - 1;
+                    }
+                    top_score[insert] = score;
+                    top_x[insert] = x;
+                    top_y[insert] = y;
+                }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+
+    let mut candidate = 0;
+    while candidate < 6 && top_x[candidate].copy() >= 0 {
+        let x = top_x[candidate].copy();
+        let y = top_y[candidate].copy();
+        bevy::Gomoku::set_cell(x, y, ai_player);
+        let attack = threat_score(x, y, ai_player);
+        let enemy_after = if attack >= 10000000 => { 0 } else => {
+            strongest_reply(opponent, size)
+        };
+        bevy::Gomoku::set_cell(x, y, 0);
+        let searched = top_score[candidate].copy() - enemy_after * 2;
+        if searched > best_score {
+            best_score = searched;
+            best_x = x;
+            best_y = y;
+        }
+        candidate = candidate + 1;
+    }
+}
+
+bevy::Gomoku::set_ai_move(best_x, best_y);
 best_x;

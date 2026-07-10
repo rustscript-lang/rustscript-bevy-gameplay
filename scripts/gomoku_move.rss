@@ -1,90 +1,60 @@
 use bevy;
 
-let size: int = bevy::Gomoku::board_size();
-let in_bounds: bool = move_x >= 0 && move_x < size && move_y >= 0 && move_y < size;
-let known_player: bool = player == 1 || player == 2;
-let empty_point: bool = if in_bounds => {
-    bevy::Gomoku::cell(move_x, move_y) == 0
-} else => {
-    false
-};
-let legal: bool = in_bounds && known_player && empty_point;
-let mut placed: bool = false;
-let place_step: bool = if legal => {
-    placed = bevy::Gomoku::set_cell(move_x, move_y, player);
-    true
-} else => {
-    false
-};
+fn line_length(x: int, y: int, dx: int, dy: int, stone: int) -> int {
+    let mut total = 1;
+    let mut px = x + dx;
+    let mut py = y + dy;
+    while bevy::Gomoku::cell(px, py) == stone {
+        total = total + 1;
+        px = px + dx;
+        py = py + dy;
+    }
+    px = x - dx;
+    py = y - dy;
+    while bevy::Gomoku::cell(px, py) == stone {
+        total = total + 1;
+        px = px - dx;
+        py = py - dy;
+    }
+    total
+}
 
-let mut winner: int = 0;
-let mut dir: int = 0;
-while legal && dir < 4 {
-    let dx: int = if dir == 0 => {
-        1
-    } else => {
-        if dir == 1 => {
-            0
-        } else => {
-            1
-        }
-    };
-    let dy: int = if dir == 0 => {
-        0
-    } else => {
-        if dir == 1 => {
-            1
-        } else => {
-            if dir == 2 => {
-                1
-            } else => {
-                -1
+fn has_five(x: int, y: int, stone: int) -> bool {
+    line_length(x, y, 1, 0, stone) >= 5 ||
+        line_length(x, y, 0, 1, stone) >= 5 ||
+        line_length(x, y, 1, 1, stone) >= 5 ||
+        line_length(x, y, 1, -1, stone) >= 5
+}
+
+fn board_full(size: int) -> bool {
+    let mut empty = 0;
+    let mut y = 0;
+    while y < size {
+        let mut x = 0;
+        while x < size {
+            if bevy::Gomoku::cell(x, y) == 0 {
+                empty = empty + 1;
             }
+            x = x + 1;
         }
-    };
-
-    let mut total: int = 1;
-    let mut x: int = move_x + dx;
-    let mut y: int = move_y + dy;
-    while bevy::Gomoku::cell(x, y) == player {
-        total = total + 1;
-        x = x + dx;
-        y = y + dy;
+        y = y + 1;
     }
+    empty == 0
+}
 
-    x = move_x - dx;
-    y = move_y - dy;
-    while bevy::Gomoku::cell(x, y) == player {
-        total = total + 1;
-        x = x - dx;
-        y = y - dy;
-    }
+let size: int = bevy::Gomoku::board_size();
+let in_bounds = move_x >= 0 && move_x < size && move_y >= 0 && move_y < size;
+let known_player = player == 1 || player == 2;
+let legal = in_bounds && known_player && bevy::Gomoku::cell(move_x, move_y) == 0;
+let mut winner = 0;
 
-    let marked: bool = if total >= 5 => {
+if legal {
+    bevy::Gomoku::set_cell(move_x, move_y, player);
+    if has_five(move_x, move_y, player) {
         winner = player;
-        true
-    } else => {
-        false
-    };
-    dir = dir + 1;
-}
-
-let mut empty_count: int = 0;
-let mut scan_y: int = 0;
-while scan_y < size {
-    let mut scan_x: int = 0;
-    while scan_x < size {
-        let counted: bool = if bevy::Gomoku::cell(scan_x, scan_y) == 0 => {
-            empty_count = empty_count + 1;
-            true
-        } else => {
-            false
-        };
-        scan_x = scan_x + 1;
     }
-    scan_y = scan_y + 1;
 }
 
-let draw: bool = legal && winner == 0 && empty_count == 0;
-let published: bool = bevy::Gomoku::set_move_result(legal, winner, draw);
+let draw = legal && winner == 0 && board_full(size);
+bevy::Gomoku::set_move_result(legal, winner, draw);
 legal;

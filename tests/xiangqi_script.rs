@@ -87,6 +87,59 @@ fn rustscript_move_rejects_generals_facing_after_move() {
 }
 
 #[test]
+fn rustscript_move_rejects_exposing_own_general_to_a_chariot() {
+    let mut world = seeded_world(&[
+        (4, 9, RED_GENERAL),
+        (4, 0, BLACK_GENERAL),
+        (4, 3, BLACK_CHARIOT),
+        (4, 7, RED_CHARIOT),
+    ]);
+
+    let summary = apply_xiangqi_move_script(&mut world, MOVE_SCRIPT, 4, 7, 5, 7, RED)
+        .expect("move script should run");
+
+    assert!(!summary.legal);
+    assert_eq!(world.resource::<XiangqiBoard>().cell(4, 7), RED_CHARIOT);
+}
+
+#[test]
+fn rustscript_move_requires_a_response_to_horse_check() {
+    let mut world = seeded_world(&[
+        (4, 9, RED_GENERAL),
+        (4, 0, BLACK_GENERAL),
+        (4, 5, RED_SOLDIER),
+        (3, 7, BLACK_HORSE),
+        (0, 9, RED_CHARIOT),
+    ]);
+
+    let ignored = apply_xiangqi_move_script(&mut world, MOVE_SCRIPT, 0, 9, 0, 8, RED)
+        .expect("move script should run");
+    assert!(!ignored.legal);
+
+    let escaped = apply_xiangqi_move_script(&mut world, MOVE_SCRIPT, 4, 9, 5, 9, RED)
+        .expect("move script should run");
+    assert!(escaped.legal);
+}
+
+#[test]
+fn rustscript_move_awards_a_stalemate_to_the_moving_side() {
+    let mut world = seeded_world(&[
+        (4, 9, RED_GENERAL),
+        (4, 0, BLACK_GENERAL),
+        (3, 1, RED_SOLDIER),
+        (5, 1, RED_SOLDIER),
+        (4, 2, RED_SOLDIER),
+        (0, 9, RED_HORSE),
+    ]);
+
+    let summary = apply_xiangqi_move_script(&mut world, MOVE_SCRIPT, 0, 9, 1, 7, RED)
+        .expect("move script should run");
+
+    assert!(summary.legal);
+    assert_eq!(summary.winner, RED);
+}
+
+#[test]
 fn rustscript_ai_captures_general_when_available() {
     let mut world = seeded_world(&[
         (4, 9, RED_GENERAL),
@@ -167,7 +220,7 @@ fn rustscript_ai_avoids_opening_an_immediate_general_loss() {
 }
 
 #[test]
-fn scripted_human_sequence_can_play_actual_turns_against_ai() {
+fn scripted_ai_sequence_uses_only_legal_moves() {
     let mut world = seeded_world(&[
         (4, 9, RED_GENERAL),
         (4, 0, BLACK_GENERAL),
@@ -178,23 +231,12 @@ fn scripted_human_sequence_can_play_actual_turns_against_ai() {
         (4, 6, RED_SOLDIER),
         (4, 3, BLACK_SOLDIER),
     ]);
-    let human_moves = [(4, 6, 4, 5), (1, 9, 2, 7), (0, 9, 0, 8), (4, 5, 4, 4)];
     let mut winner = 0;
     let mut turns = 0;
 
-    for &(from_x, from_y, to_x, to_y) in &human_moves {
-        let human =
-            apply_xiangqi_move_script(&mut world, MOVE_SCRIPT, from_x, from_y, to_x, to_y, RED)
-                .expect("human move script should run");
-        assert!(human.legal);
-        winner = human.winner;
-        turns += 1;
-        if winner != 0 {
-            break;
-        }
-
+    for side in [RED, BLACK, RED, BLACK] {
         let ai_move =
-            choose_xiangqi_ai_move(&mut world, AI_SCRIPT, BLACK).expect("AI script should choose");
+            choose_xiangqi_ai_move(&mut world, AI_SCRIPT, side).expect("AI script should choose");
         let ai = apply_xiangqi_move_script(
             &mut world,
             MOVE_SCRIPT,
@@ -202,7 +244,7 @@ fn scripted_human_sequence_can_play_actual_turns_against_ai() {
             ai_move.from_y,
             ai_move.to_x,
             ai_move.to_y,
-            BLACK,
+            side,
         )
         .expect("AI move script should run");
         assert!(ai.legal);
@@ -213,6 +255,6 @@ fn scripted_human_sequence_can_play_actual_turns_against_ai() {
         }
     }
 
-    assert!(turns >= 4);
+    assert!(turns >= 2);
     assert!(winner == 0 || winner == RED || winner == BLACK);
 }
