@@ -1,6 +1,7 @@
 use pretty_assertions::assert_eq;
 use rustscript_bevy_gameplay::{
-    GomokuBoard, apply_gomoku_move_script, choose_gomoku_ai_move, reset_gomoku_board,
+    GomokuBoard, apply_gomoku_move_script, choose_gomoku_ai_move, choose_gomoku_ai_move_with_bias,
+    reset_gomoku_board,
 };
 
 const MOVE_SCRIPT: &str = include_str!("../scripts/gomoku_move.rss");
@@ -89,6 +90,20 @@ fn rustscript_ai_reuses_cached_jit_traces_for_same_script() {
         second.telemetry.jit_trace_count, third.telemetry.jit_trace_count,
         "same script and same board should reuse already compiled traces"
     );
+}
+
+#[test]
+fn rustscript_ai_can_read_bias_parameter() {
+    let script = "use bevy;\nlet x: int = if ai_bias > 0 => { 8 } else => { 6 };\nbevy::Gomoku::set_ai_move(x, 7);\nx;";
+    let mut world = seeded_world(&[]);
+
+    let cautious = choose_gomoku_ai_move_with_bias(&mut world, script, 2, -100)
+        .expect("AI script should choose a move");
+    let aggressive = choose_gomoku_ai_move_with_bias(&mut world, script, 2, 100)
+        .expect("AI script should choose a move");
+
+    assert_eq!((cautious.x, cautious.y), (6, 7));
+    assert_eq!((aggressive.x, aggressive.y), (8, 7));
 }
 
 #[test]

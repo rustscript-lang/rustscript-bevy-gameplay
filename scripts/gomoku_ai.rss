@@ -198,6 +198,11 @@ fn threat_score(board: [int], x: int, y: int, stone: int) -> int {
 }
 
 let opponent: int = if ai_player == 1 => { 2 } else => { 1 };
+let bias: int = if ai_bias < -100 => { -100 } else => { if ai_bias > 100 => { 100 } else => { ai_bias } };
+let attack_scale: int = 100 + bias;
+let defense_scale: int = 100 - bias;
+let attack_bonus: int = if bias > 0 => { bias * 70000 } else => { 0 };
+let defense_bonus: int = if bias < 0 => { -bias * 70000 } else => { 0 };
 let center = 7;
 let mut best_x = -1;
 let mut best_y = -1;
@@ -324,24 +329,24 @@ if stones == 0 {
                         board[y * 15 + x] = 0;
 
                         let distance = abs_int(x - center) + abs_int(y - center);
-                        let mut order = attack * 2 + defense * 2 - distance;
+                        let mut order = (attack * attack_scale + defense * defense_scale) / 50 - distance;
                         if own_wins >= 2 {
-                            order = 1500000000 + attack - distance;
+                            order = 1500000000 + attack + attack_bonus - distance;
                         } else {
                             if enemy_extensions >= 2 {
-                                order = 1200000000 + defense - distance;
+                                order = 1200000000 + defense + defense_bonus - distance;
                             } else {
                                 if defense >= 120000 {
-                                    order = 1200000000 + defense - distance;
+                                    order = 1200000000 + defense + defense_bonus - distance;
                                 } else {
                                     if defense >= 32000 {
-                                        order = 900000000 + defense - distance;
+                                        order = 900000000 + defense + defense_bonus - distance;
                                     } else {
                                         if own_wins == 1 {
-                                            order = order + 18000000;
+                                            order = order + 18000000 + attack_bonus;
                                         }
                                         if enemy_extensions == 1 {
-                                            order = order + 12000000;
+                                            order = order + 12000000 + defense_bonus;
                                         }
                                     }
                                 }
@@ -422,7 +427,7 @@ if stones == 0 {
                                 }
                                 board[reply_y_scan * 15 + reply_x_scan] = 0;
 
-                                let mut order = attack * 3 + block * 4;
+                                let mut order = attack * (300 - bias) / 100 + block * (400 + bias) / 100;
                                 if extensions >= 2 {
                                     order = 1500000000 + attack;
                                 }

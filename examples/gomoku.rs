@@ -14,7 +14,8 @@ use bevy_egui::{
 };
 use rustscript_bevy_gameplay::{
     GOMOKU_BOARD_SIZE, GomokuAiMove, GomokuBoard, GomokuMoveSummary, apply_gomoku_move_script,
-    choose_gomoku_ai_move, debug_gomoku_ai_script, debug_gomoku_move_script, reset_gomoku_board,
+    choose_gomoku_ai_move, choose_gomoku_ai_move_with_bias, debug_gomoku_ai_script_with_bias,
+    debug_gomoku_move_script, reset_gomoku_board,
 };
 use script_editor::{DebugSession, EditorAction, LiveScriptEditor, ScriptTab};
 use vm::{DebugCommandBridge, Debugger};
@@ -34,7 +35,7 @@ const AI_TAKEOVER_MOVE_DELAY: Duration = Duration::from_secs(1);
 const SCRIPT_TITLES: &[&str] = &["move.rss", "ai.rss"];
 const GOMOKU_MOVE_PREFIX: &str =
     "let move_x: int = 0;\nlet move_y: int = 0;\nlet player: int = 1;\n";
-const GOMOKU_AI_PREFIX: &str = "let ai_player: int = 2;\n";
+const GOMOKU_AI_PREFIX: &str = "let ai_player: int = 2;\nlet ai_bias: int = 0;\n";
 const GOMOKU_HOST_APIS: &[&str] = &[
     "bevy::Gomoku::board",
     "bevy::Gomoku::cell",
@@ -48,6 +49,7 @@ struct GomokuUiState {
     message: String,
     current_player: i64,
     ai_takeover: f32,
+    ai_bias: i64,
     last_ai_takeover_move_at: Option<Instant>,
     winner: i64,
     draw: bool,
@@ -64,6 +66,7 @@ impl Default for GomokuUiState {
             message: "Your turn".to_string(),
             current_player: HUMAN,
             ai_takeover: 0.0,
+            ai_bias: 0,
             last_ai_takeover_move_at: None,
             winner: 0,
             draw: false,
@@ -150,6 +153,29 @@ fn initial_window_resolution() -> (u32, u32) {
 
 fn centered_board_leading_space(available_width: f32, board_width: f32) -> f32 {
     ((available_width - board_width) * 0.5).max(0.0)
+}
+
+fn ai_assist_switch(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
+    let desired = egui::vec2(42.0, 22.0);
+    let (rect, mut response) = ui.allocate_exact_size(desired, egui::Sense::click());
+    if response.clicked() {
+        *enabled = !*enabled;
+        response.mark_changed();
+    }
+    let t = ui.ctx().animate_bool(response.id, *enabled);
+    let bg = if *enabled {
+        egui::Color32::from_rgb(54, 164, 92)
+    } else {
+        egui::Color32::from_rgb(72, 78, 82)
+    };
+    ui.painter().rect_filled(rect, 11.0, bg);
+    let knob_x = egui::lerp((rect.left() + 11.0)..=(rect.right() - 11.0), t);
+    ui.painter().circle_filled(
+        egui::pos2(knob_x, rect.center().y),
+        8.5,
+        egui::Color32::from_rgb(238, 241, 242),
+    );
+    response
 }
 
 fn setup(world: &mut World) {
@@ -323,16 +349,10 @@ fn gomoku_ui(world: &mut World) {
                                     .size(12.0)
                                     .color(egui::Color32::from_rgb(174, 184, 188)),
                             );
-                            let changed = ui
-                                .add(
-                                    egui::Slider::new(&mut state.ai_takeover, 0.0..=1.0)
-                                        .show_value(false)
-                                        .clamping(egui::SliderClamping::Always),
-                                )
-                                .changed();
+                            let mut assist_enabled = gomoku_ai_takeover_enabled(&state);
+                            let changed = ai_assist_switch(ui, &mut assist_enabled).changed();
                             if changed {
-                                state.ai_takeover =
-                                    if state.ai_takeover >= 0.5 { 1.0 } else { 0.0 };
+                                state.ai_takeover = if assist_enabled { 1.0 } else { 0.0 };
                                 state.last_ai_takeover_move_at =
                                     gomoku_ai_takeover_enabled(&state).then(Instant::now);
                                 if gomoku_ai_takeover_enabled(&state)
@@ -359,6 +379,18 @@ fn gomoku_ui(world: &mut World) {
                                 })
                                 .size(12.0)
                                 .color(egui::Color32::from_rgb(174, 184, 188)),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("AI Bias")
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(174, 184, 188)),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut state.ai_bias, -100..=100)
+                                    .show_value(true)
+                                    .clamping(egui::SliderClamping::Always),
                             );
                         });
                         ui.separator();
@@ -604,6 +636,7 @@ fn maybe_run_gomoku_ai_turn_at(world: &mut World, now: Instant) {
 }
 
 fn play_gomoku_ai_turn(world: &mut World, player: i64) {
+    let ai_bias = world.resource::<GomokuUiState>().ai_bias;
     let (move_script, ai_script) = {
         let scripts = world.resource::<GomokuScripts>();
         (
@@ -613,7 +646,7 @@ fn play_gomoku_ai_turn(world: &mut World, player: i64) {
     };
     if let Some(mut scripts) = world.remove_resource::<GomokuScripts>() {
         let started_debug =
-            start_gomoku_ai_debug_for_turn(world, &mut scripts, ai_script.clone(), player);
+            start_gomoku_ai_debug_for_turn(world, &mut scripts, ai_script.clone(), player, ai_bias);
         world.insert_resource(scripts);
         if started_debug {
             world.resource_mut::<GomokuUiState>().message = "AI debugger paused".to_string();
@@ -621,7 +654,7 @@ fn play_gomoku_ai_turn(world: &mut World, player: i64) {
         }
     }
 
-    let ai_move = match choose_gomoku_ai_move(world, &ai_script, player) {
+    let ai_move = match choose_gomoku_ai_move_with_bias(world, &ai_script, player, ai_bias) {
         Ok(ai_move) => ai_move,
         Err(err) => {
             world.resource_mut::<GomokuUiState>().message = format!("AI script error: {err}");
@@ -716,6 +749,7 @@ fn start_gomoku_debug_session(world: &mut World, scripts: &mut GomokuScripts, ta
     let source = scripts.editor.active_source(tab).to_string();
     let source_line_offset = scripts.editor.source_line_offset(tab);
     let board = world.resource::<GomokuBoard>().clone();
+    let ai_bias = world.resource::<GomokuUiState>().ai_bias;
     let (debug_x, debug_y) = first_open_gomoku_point(&board);
     let bridge = DebugCommandBridge::new();
     let thread_bridge = bridge.clone();
@@ -741,8 +775,14 @@ fn start_gomoku_debug_session(world: &mut World, scripts: &mut GomokuScripts, ta
                 )
             })
         } else {
-            debug_gomoku_ai_script(&mut debug_world, &source, COMPUTER, &mut debugger)
-                .map(|mv| format!("debug complete: ai=({}, {})", mv.x, mv.y))
+            debug_gomoku_ai_script_with_bias(
+                &mut debug_world,
+                &source,
+                COMPUTER,
+                ai_bias,
+                &mut debugger,
+            )
+            .map(|mv| format!("debug complete: ai=({}, {})", mv.x, mv.y))
         };
         let _ = sender.send(result.unwrap_or_else(|err| format!("debug error: {err}")));
     });
@@ -761,6 +801,7 @@ fn start_gomoku_ai_debug_for_turn(
     scripts: &mut GomokuScripts,
     source: String,
     player: i64,
+    ai_bias: i64,
 ) -> bool {
     if !(scripts.editor.debug_pending && scripts.editor.debug_tab == Some(AI_TAB)) {
         return false;
@@ -776,7 +817,13 @@ fn start_gomoku_ai_debug_for_turn(
         debug_world.insert_resource(board);
         let mut debugger = Debugger::with_command_bridge(thread_bridge);
         debugger.stop_on_entry();
-        let result = debug_gomoku_ai_script(&mut debug_world, &source, player, &mut debugger);
+        let result = debug_gomoku_ai_script_with_bias(
+            &mut debug_world,
+            &source,
+            player,
+            ai_bias,
+            &mut debugger,
+        );
         let output = result
             .as_ref()
             .map(|mv| format!("debug complete: ai=({}, {})", mv.x, mv.y))

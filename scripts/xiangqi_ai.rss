@@ -348,6 +348,7 @@ fn move_order_score(board: [int], side: int, fx: int, fy: int, tx: int, ty: int)
 }
 
 let opponent: int = -ai_player;
+let bias: int = if ai_bias < -100 => { -100 } else => { if ai_bias > 100 => { 100 } else => { ai_bias } };
 let opponent_general_square: int = find_general_square(&board, opponent);
 let opponent_general_x: int = opponent_general_square % 9;
 let opponent_general_y: int = opponent_general_square / 9;
@@ -374,11 +375,14 @@ while fy < 10 {
                         let piece: int = (&board)[from_index];
                         let target: int = (&board)[to_index];
                         let mut score = move_order_score(&board, ai_player, fx, fy, tx, ty);
+                        if target != 0 {
+                            score = score + bias * base_value(abs_int(target)) / 100;
+                        }
                         board[from_index] = 0;
                         board[to_index] = piece;
                         if opponent_general_x >= 0 &&
                             pseudo_legal(&board, ai_player, tx, ty, opponent_general_x, opponent_general_y) {
-                            score = score + 50000;
+                            score = score + 50000 + bias * 800;
                         }
                         board[from_index] = piece;
                         board[to_index] = target;
@@ -492,7 +496,7 @@ while candidate < 10 && top_fx[candidate].copy() >= 0 && best_score < 800000000 
 
     board[from_index] = piece;
     board[to_index] = target;
-    let final_score = searched + top_score[candidate].copy() / 10000;
+    let final_score = searched + top_score[candidate].copy() / 10000 + top_score[candidate].copy() * bias / 20000;
     if final_score > best_score {
         best_score = final_score;
         best_fx = fx;

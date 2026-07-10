@@ -404,9 +404,19 @@ pub fn choose_gomoku_ai_move(
     source: &str,
     ai_player: i64,
 ) -> Result<GomokuAiMove, String> {
+    choose_gomoku_ai_move_with_bias(world, source, ai_player, 0)
+}
+
+pub fn choose_gomoku_ai_move_with_bias(
+    world: &mut World,
+    source: &str,
+    ai_player: i64,
+    ai_bias: i64,
+) -> Result<GomokuAiMove, String> {
     ensure_gomoku_resources(world);
     world.insert_resource(GomokuScriptState::default());
-    let wrapped = format!("let ai_player: int = {ai_player};\n{source}");
+    let wrapped =
+        format!("let ai_player: int = {ai_player};\nlet ai_bias: int = {ai_bias};\n{source}");
     let (_value, telemetry) = with_gomoku_context(world, || run_cached_gomoku_ai_script(&wrapped))?;
     let state = *world
         .get_resource::<GomokuScriptState>()
@@ -450,9 +460,20 @@ pub fn debug_gomoku_ai_script(
     ai_player: i64,
     debugger: &mut Debugger,
 ) -> Result<GomokuAiMove, String> {
+    debug_gomoku_ai_script_with_bias(world, source, ai_player, 0, debugger)
+}
+
+pub fn debug_gomoku_ai_script_with_bias(
+    world: &mut World,
+    source: &str,
+    ai_player: i64,
+    ai_bias: i64,
+    debugger: &mut Debugger,
+) -> Result<GomokuAiMove, String> {
     ensure_gomoku_resources(world);
     world.insert_resource(GomokuScriptState::default());
-    let wrapped = format!("let ai_player: int = {ai_player};\n{source}");
+    let wrapped =
+        format!("let ai_player: int = {ai_player};\nlet ai_bias: int = {ai_bias};\n{source}");
     let (_value, telemetry) = with_gomoku_context(world, || {
         run_gomoku_script_with_debugger(&wrapped, debugger)
     })?;
@@ -504,9 +525,19 @@ pub fn choose_xiangqi_ai_move(
     source: &str,
     ai_player: i64,
 ) -> Result<XiangqiAiMove, String> {
+    choose_xiangqi_ai_move_with_bias(world, source, ai_player, 0)
+}
+
+pub fn choose_xiangqi_ai_move_with_bias(
+    world: &mut World,
+    source: &str,
+    ai_player: i64,
+    ai_bias: i64,
+) -> Result<XiangqiAiMove, String> {
     ensure_xiangqi_resources(world);
     world.insert_resource(XiangqiScriptState::default());
-    let wrapped = format!("let ai_player: int = {ai_player};\n{source}");
+    let wrapped =
+        format!("let ai_player: int = {ai_player};\nlet ai_bias: int = {ai_bias};\n{source}");
     let (_value, telemetry) =
         with_xiangqi_context(world, || run_cached_xiangqi_ai_script(&wrapped))?;
     let state = *world
@@ -558,9 +589,20 @@ pub fn debug_xiangqi_ai_script(
     ai_player: i64,
     debugger: &mut Debugger,
 ) -> Result<XiangqiAiMove, String> {
+    debug_xiangqi_ai_script_with_bias(world, source, ai_player, 0, debugger)
+}
+
+pub fn debug_xiangqi_ai_script_with_bias(
+    world: &mut World,
+    source: &str,
+    ai_player: i64,
+    ai_bias: i64,
+    debugger: &mut Debugger,
+) -> Result<XiangqiAiMove, String> {
     ensure_xiangqi_resources(world);
     world.insert_resource(XiangqiScriptState::default());
-    let wrapped = format!("let ai_player: int = {ai_player};\n{source}");
+    let wrapped =
+        format!("let ai_player: int = {ai_player};\nlet ai_bias: int = {ai_bias};\n{source}");
     let (_value, telemetry) = with_xiangqi_context(world, || {
         run_xiangqi_script_with_debugger(&wrapped, debugger)
     })?;

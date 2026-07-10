@@ -1,6 +1,7 @@
 use pretty_assertions::assert_eq;
 use rustscript_bevy_gameplay::{
-    XiangqiBoard, apply_xiangqi_move_script, choose_xiangqi_ai_move, reset_xiangqi_board,
+    XiangqiBoard, apply_xiangqi_move_script, choose_xiangqi_ai_move,
+    choose_xiangqi_ai_move_with_bias, reset_xiangqi_board,
 };
 
 const MOVE_SCRIPT: &str = include_str!("../scripts/xiangqi_move.rss");
@@ -200,6 +201,36 @@ fn rustscript_ai_reuses_cached_jit_traces_for_same_script() {
     assert!(
         last.telemetry.jit_trace_count > first.telemetry.jit_trace_count,
         "same cached VM should keep warming new trace roots across repeated runs"
+    );
+}
+
+#[test]
+fn rustscript_ai_can_read_bias_parameter() {
+    let script = "use bevy;\nlet to_x: int = if ai_bias > 0 => { 5 } else => { 3 };\nbevy::Xiangqi::set_ai_move(4, 0, to_x, 0);\n0;";
+    let mut world = seeded_world(&[(4, 9, RED_GENERAL), (4, 0, BLACK_GENERAL)]);
+
+    let cautious = choose_xiangqi_ai_move_with_bias(&mut world, script, BLACK, -100)
+        .expect("AI script should choose a move");
+    let aggressive = choose_xiangqi_ai_move_with_bias(&mut world, script, BLACK, 100)
+        .expect("AI script should choose a move");
+
+    assert_eq!(
+        (
+            cautious.from_x,
+            cautious.from_y,
+            cautious.to_x,
+            cautious.to_y
+        ),
+        (4, 0, 3, 0)
+    );
+    assert_eq!(
+        (
+            aggressive.from_x,
+            aggressive.from_y,
+            aggressive.to_x,
+            aggressive.to_y
+        ),
+        (4, 0, 5, 0)
     );
 }
 
