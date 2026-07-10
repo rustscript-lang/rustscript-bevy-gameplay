@@ -1,3 +1,7 @@
+use std::{fs, path::PathBuf};
+
+const BOARD_SAVE_EXTENSION: &str = "rssboard";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptSave {
     pub title: String,
@@ -8,6 +12,47 @@ pub struct ScriptSave {
 pub struct BoardSavePackage {
     pub cells: Vec<i64>,
     pub scripts: Vec<ScriptSave>,
+}
+
+pub fn save_board_file(
+    dialog_title: &str,
+    default_file_name: &str,
+    contents: &str,
+) -> Result<Option<PathBuf>, String> {
+    let Some(mut path) = rfd::FileDialog::new()
+        .set_title(dialog_title)
+        .set_file_name(default_file_name)
+        .add_filter("RustScript board", &[BOARD_SAVE_EXTENSION])
+        .save_file()
+    else {
+        return Ok(None);
+    };
+    if path.extension().is_none() {
+        path.set_extension(BOARD_SAVE_EXTENSION);
+    }
+    fs::write(&path, contents)
+        .map_err(|err| format!("could not write {}: {err}", path.display()))?;
+    Ok(Some(path))
+}
+
+pub fn load_board_file(dialog_title: &str) -> Result<Option<(PathBuf, String)>, String> {
+    let Some(path) = rfd::FileDialog::new()
+        .set_title(dialog_title)
+        .add_filter("RustScript board", &[BOARD_SAVE_EXTENSION])
+        .pick_file()
+    else {
+        return Ok(None);
+    };
+    let contents = fs::read_to_string(&path)
+        .map_err(|err| format!("could not read {}: {err}", path.display()))?;
+    Ok(Some((path, contents)))
+}
+
+pub fn display_file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 pub fn encode_board_save(game: &str, cells: &[i64], scripts: &[(&str, &str)]) -> String {

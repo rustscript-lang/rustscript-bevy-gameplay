@@ -49,7 +49,6 @@ struct GomokuUiState {
     jit_enabled: bool,
     jit_trace_count: usize,
     last_ai_move_micros: Option<u128>,
-    board_io_text: String,
     board_io_status: String,
 }
 
@@ -63,7 +62,6 @@ impl Default for GomokuUiState {
             jit_enabled: true,
             jit_trace_count: 0,
             last_ai_move_micros: None,
-            board_io_text: String::new(),
             board_io_status: String::new(),
         }
     }
@@ -234,39 +232,6 @@ fn gomoku_ui(world: &mut World) {
                         ui.label(status_text(&state));
                         ui.add_space(3.0);
                         ui.label(telemetry_text(&state));
-                        ui.add_space(12.0);
-                        if ui.button("Restart").clicked() {
-                            restart = true;
-                        }
-                        egui::CollapsingHeader::new("Save / Load")
-                            .id_salt("gomoku_save_load")
-                            .default_open(false)
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    if ui.button("Export").clicked() {
-                                        state.board_io_text =
-                                            export_gomoku_save(&board, &scripts.editor);
-                                        state.board_io_status =
-                                            "Exported board and scripts".to_string();
-                                    }
-                                    if ui.button("Import").clicked() {
-                                        pending_import = Some(state.board_io_text.clone());
-                                    }
-                                });
-                                ui.add(
-                                    egui::TextEdit::multiline(&mut state.board_io_text)
-                                        .font(egui::TextStyle::Monospace)
-                                        .desired_width(ui.available_width().min(620.0))
-                                        .desired_rows(4),
-                                );
-                                if !state.board_io_status.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new(&state.board_io_status)
-                                            .size(12.0)
-                                            .color(egui::Color32::from_rgb(174, 184, 188)),
-                                    );
-                                }
-                            });
                         ui.add_space(10.0);
 
                         let available_width = ui.available_width();
@@ -276,7 +241,7 @@ fn gomoku_ui(world: &mut World) {
                         let vertical_space = ((ui.available_height() - board_side) * 0.5).max(0.0);
                         ui.add_space(vertical_space);
                         let leading_space =
-                            centered_board_leading_space(available_width, board_side);
+                            centered_board_leading_space(available_width, board_side) + gap * 0.5;
                         ui.horizontal(|ui| {
                             ui.add_space(leading_space);
                             clicked_move = draw_board(ui, &board, &state, board_side);
@@ -291,6 +256,46 @@ fn gomoku_ui(world: &mut World) {
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.set_min_height(row_height);
+                        ui.horizontal(|ui| {
+                            if ui.button("Restart").clicked() {
+                                restart = true;
+                            }
+                            if ui.button("Save").clicked() {
+                                let contents = export_gomoku_save(&board, &scripts.editor);
+                                state.board_io_status = match board_save::save_board_file(
+                                    "Save Gomoku game",
+                                    "gomoku.rssboard",
+                                    &contents,
+                                ) {
+                                    Ok(Some(path)) => {
+                                        format!("Saved {}", board_save::display_file_name(&path))
+                                    }
+                                    Ok(None) => "Save cancelled".to_string(),
+                                    Err(err) => format!("Save error: {err}"),
+                                };
+                            }
+                            if ui.button("Load").clicked() {
+                                match board_save::load_board_file("Load Gomoku game") {
+                                    Ok(Some((path, contents))) => {
+                                        pending_import = Some((path, contents));
+                                    }
+                                    Ok(None) => {
+                                        state.board_io_status = "Load cancelled".to_string();
+                                    }
+                                    Err(err) => {
+                                        state.board_io_status = format!("Load error: {err}");
+                                    }
+                                }
+                            }
+                        });
+                        if !state.board_io_status.is_empty() {
+                            ui.label(
+                                egui::RichText::new(&state.board_io_status)
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(174, 184, 188)),
+                            );
+                        }
+                        ui.separator();
                         editor_actions = scripts.editor.ui(ui);
                     },
                 );
@@ -301,7 +306,7 @@ fn gomoku_ui(world: &mut World) {
     system_state.apply(world);
     handle_gomoku_editor_actions(world, &mut scripts, editor_actions);
 
-    if let Some(text) = pending_import {
+    if let Some((path, text)) = pending_import {
         clicked_move = None;
         match import_gomoku_save(world, &mut scripts, &text) {
             Ok(()) => {
@@ -309,10 +314,10 @@ fn gomoku_ui(world: &mut World) {
                 state.winner = 0;
                 state.draw = false;
                 state.last_ai_move = None;
-                state.board_io_status = "Imported board and scripts".to_string();
+                state.board_io_status = format!("Loaded {}", board_save::display_file_name(&path));
             }
             Err(err) => {
-                state.board_io_status = format!("Import error: {err}");
+                state.board_io_status = format!("Load error: {err}");
             }
         }
     }
