@@ -2604,6 +2604,7 @@ fn script_panel(
             ui.add(
                 egui::TextEdit::multiline(&mut editor.buffer)
                     .code_editor()
+                    .font(egui::FontId::monospace(13.0))
                     .desired_rows(26)
                     .desired_width(f32::INFINITY)
                     .layouter(&mut layouter),

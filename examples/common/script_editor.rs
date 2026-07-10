@@ -7,6 +7,8 @@ use std::{
 use bevy_egui::egui;
 use vm::{DebugCommandBridge, DebugCommandBridgeError, SourceError, SourceMap, compile_source};
 
+const CODE_FONT_SIZE: f32 = 13.0;
+
 #[derive(Debug, Clone)]
 pub struct ScriptTab {
     pub title: &'static str,
@@ -516,7 +518,7 @@ impl LiveScriptEditor {
         let remaining_height = ui.available_height().max(panel_height - 140.0);
         let code_height = (remaining_height - console_height - 48.0).max(240.0);
         let line_count = tab.buffer.lines().count().max(1);
-        let row_height = ui.text_style_height(&egui::TextStyle::Monospace).max(16.0);
+        let row_height = (CODE_FONT_SIZE + 4.0).max(16.0);
         let content_height = (line_count as f32 * row_height + 24.0).max(code_height);
         let gutter_width = 42.0;
         let text_width = (code_width - gutter_width - 8.0).max(140.0);
@@ -594,7 +596,7 @@ impl LiveScriptEditor {
                         .scope(|ui| {
                             ui.set_min_size(egui::vec2(text_width, content_height));
                             egui::TextEdit::multiline(&mut tab.buffer)
-                                .font(egui::TextStyle::Monospace)
+                                .font(code_font_id())
                                 .desired_width(text_width)
                                 .desired_rows(line_count)
                                 .lock_focus(true)
@@ -730,7 +732,7 @@ fn render_debug_console(
         let response = ui.add_enabled(
             editor.debug_attached,
             egui::TextEdit::singleline(&mut editor.console_input)
-                .font(egui::TextStyle::Monospace)
+                .font(code_font_id())
                 .desired_width(input_width)
                 .hint_text("help | locals | print name | where"),
         );
@@ -1204,6 +1206,10 @@ fn append_script_text(job: &mut egui::text::LayoutJob, text: &str, format: egui:
     job.append(text, 0.0, format);
 }
 
+fn code_font_id() -> egui::FontId {
+    egui::FontId::monospace(CODE_FONT_SIZE)
+}
+
 fn token_format(
     kind: ScriptTokenKind,
     start: usize,
@@ -1234,7 +1240,7 @@ fn plain_format(
     source: &str,
 ) -> egui::TextFormat {
     let mut format = egui::TextFormat {
-        font_id: egui::FontId::monospace(11.0),
+        font_id: code_font_id(),
         color: egui::Color32::from_rgb(220, 228, 238),
         ..Default::default()
     };
