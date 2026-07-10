@@ -95,20 +95,12 @@ fn gomoku_example_script_smoke_runs_end_to_end() {
     assert!(
         stdout.contains("gomoku_turns=")
             && stdout.contains("stones=")
-            && stdout.contains("jit_enabled=true")
-            && stdout.contains("jit_traces=")
             && stdout.contains("ai_move_us="),
         "unexpected gomoku example stdout:\n{stdout}"
     );
-    let traces = stdout
-        .split("jit_traces=")
-        .nth(1)
-        .and_then(|tail| tail.split(',').next())
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .expect("gomoku smoke should report numeric JIT traces");
     assert!(
-        traces < 50,
-        "gomoku smoke should report compiled traces for the latest AI script, not an accumulated run count: {stdout}"
+        !stdout.contains("jit_enabled=") && !stdout.contains("jit_traces="),
+        "gomoku smoke should not print JIT fields:\n{stdout}"
     );
 }
 
@@ -128,9 +120,11 @@ fn xiangqi_example_script_smoke_runs_end_to_end() {
     assert!(
         stdout.contains("xiangqi_turns=")
             && stdout.contains("pieces=")
-            && stdout.contains("jit_enabled=true")
-            && stdout.contains("jit_traces=")
             && stdout.contains("ai_move_us="),
         "unexpected xiangqi example stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("jit_enabled=") && !stdout.contains("jit_traces="),
+        "xiangqi smoke should not print JIT fields:\n{stdout}"
     );
 }

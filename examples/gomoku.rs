@@ -1,6 +1,7 @@
 use std::{
     sync::{Arc, Mutex, mpsc},
     thread,
+    time::{Duration, Instant},
 };
 
 use bevy::{
@@ -29,6 +30,7 @@ const HUMAN: i64 = 1;
 const COMPUTER: i64 = 2;
 const MOVE_TAB: usize = 0;
 const AI_TAB: usize = 1;
+const AI_TAKEOVER_MOVE_DELAY: Duration = Duration::from_secs(1);
 const SCRIPT_TITLES: &[&str] = &["move.rss", "ai.rss"];
 const GOMOKU_MOVE_PREFIX: &str =
     "let move_x: int = 0;\nlet move_y: int = 0;\nlet player: int = 1;\n";
@@ -46,6 +48,7 @@ struct GomokuUiState {
     message: String,
     current_player: i64,
     ai_takeover: f32,
+    last_ai_takeover_move_at: Option<Instant>,
     winner: i64,
     draw: bool,
     last_ai_move: Option<GomokuAiMove>,
@@ -61,6 +64,7 @@ impl Default for GomokuUiState {
             message: "Your turn".to_string(),
             current_player: HUMAN,
             ai_takeover: 0.0,
+            last_ai_takeover_move_at: None,
             winner: 0,
             draw: false,
             last_ai_move: None,
@@ -157,8 +161,6 @@ fn run_script_smoke() {
     let mut turns = 0;
     let mut winner = 0;
     let mut draw = false;
-    let mut jit_enabled = false;
-    let mut jit_traces = 0;
     let mut ai_move_us = 0;
 
     for &(x, y) in &human_moves {
@@ -176,8 +178,6 @@ fn run_script_smoke() {
 
         let ai_move =
             choose_gomoku_ai_move(&mut world, AI_SCRIPT, COMPUTER).expect("AI script should run");
-        jit_enabled = ai_move.telemetry.jit_enabled;
-        jit_traces = ai_move.telemetry.jit_trace_count;
         ai_move_us = ai_move.telemetry.elapsed_micros;
         let ai = apply_gomoku_move_script(&mut world, MOVE_SCRIPT, ai_move.x, ai_move.y, COMPUTER)
             .expect("AI move script should run");
@@ -199,7 +199,7 @@ fn run_script_smoke() {
         .filter(|&&stone| stone != 0)
         .count();
     println!(
-        "gomoku_turns={turns}, stones={stones}, winner={winner}, draw={draw}, jit_enabled={jit_enabled}, jit_traces={jit_traces}, ai_move_us={ai_move_us}"
+        "gomoku_turns={turns}, stones={stones}, winner={winner}, draw={draw}, ai_move_us={ai_move_us}"
     );
 }
 
@@ -321,6 +321,8 @@ fn gomoku_ui(world: &mut World) {
                             if changed {
                                 state.ai_takeover =
                                     if state.ai_takeover >= 0.5 { 1.0 } else { 0.0 };
+                                state.last_ai_takeover_move_at =
+                                    gomoku_ai_takeover_enabled(&state).then(Instant::now);
                                 if gomoku_ai_takeover_enabled(&state)
                                     && state.winner == 0
                                     && !state.draw
@@ -364,6 +366,7 @@ fn gomoku_ui(world: &mut World) {
             Ok(()) => {
                 state.message = "Imported board and scripts".to_string();
                 state.current_player = HUMAN;
+                state.last_ai_takeover_move_at = None;
                 state.winner = 0;
                 state.draw = false;
                 state.last_ai_move = None;
@@ -556,12 +559,24 @@ fn play_human_turn(world: &mut World, x: i64, y: i64) {
 }
 
 fn maybe_run_gomoku_ai_turn(world: &mut World) {
+    maybe_run_gomoku_ai_turn_at(world, Instant::now());
+}
+
+fn maybe_run_gomoku_ai_turn_at(world: &mut World, now: Instant) {
     let state = world.resource::<GomokuUiState>().clone();
     if state.winner != 0 || state.draw {
         return;
     }
     let player = state.current_player;
-    if player != COMPUTER && !gomoku_ai_takeover_enabled(&state) {
+    let takeover_enabled = gomoku_ai_takeover_enabled(&state);
+    if player != COMPUTER && !takeover_enabled {
+        return;
+    }
+    if takeover_enabled
+        && state
+            .last_ai_takeover_move_at
+            .is_some_and(|last| now.duration_since(last) < AI_TAKEOVER_MOVE_DELAY)
+    {
         return;
     }
     let scripts = world.resource::<GomokuScripts>();
@@ -569,6 +584,11 @@ fn maybe_run_gomoku_ai_turn(world: &mut World) {
         return;
     }
     play_gomoku_ai_turn(world, player);
+    if takeover_enabled {
+        world
+            .resource_mut::<GomokuUiState>()
+            .last_ai_takeover_move_at = Some(now);
+    }
 }
 
 fn play_gomoku_ai_turn(world: &mut World, player: i64) {
@@ -813,6 +833,9 @@ fn poll_gomoku_ai_debug_result(
             state.last_ai_move = Some(ai_move);
             if summary.winner == 0 && !summary.draw {
                 state.current_player = other_gomoku_player(player);
+                if gomoku_ai_takeover_enabled(state) {
+                    state.last_ai_takeover_move_at = Some(Instant::now());
+                }
             }
             state.message = if summary.winner == HUMAN {
                 "Black wins".to_string()
@@ -984,14 +1007,32 @@ mod tests {
     fn ai_takeover_advances_both_gomoku_sides() {
         let mut world = fast_gomoku_world();
         world.resource_mut::<GomokuUiState>().ai_takeover = 1.0;
+        let now = Instant::now();
 
-        maybe_run_gomoku_ai_turn(&mut world);
+        maybe_run_gomoku_ai_turn_at(&mut world, now);
         assert_eq!(world.resource::<GomokuBoard>().cell(7, 7), HUMAN);
         assert_eq!(world.resource::<GomokuUiState>().current_player, COMPUTER);
 
-        maybe_run_gomoku_ai_turn(&mut world);
+        maybe_run_gomoku_ai_turn_at(&mut world, now + AI_TAKEOVER_MOVE_DELAY);
         assert_eq!(world.resource::<GomokuBoard>().cell(8, 7), COMPUTER);
         assert_eq!(world.resource::<GomokuUiState>().current_player, HUMAN);
+    }
+
+    #[test]
+    fn ai_takeover_waits_between_gomoku_moves() {
+        let mut world = fast_gomoku_world();
+        let now = Instant::now();
+        {
+            let mut state = world.resource_mut::<GomokuUiState>();
+            state.ai_takeover = 1.0;
+            state.last_ai_takeover_move_at = Some(now);
+        }
+
+        maybe_run_gomoku_ai_turn_at(&mut world, now + Duration::from_millis(999));
+        assert_eq!(world.resource::<GomokuBoard>().cell(7, 7), 0);
+
+        maybe_run_gomoku_ai_turn_at(&mut world, now + AI_TAKEOVER_MOVE_DELAY);
+        assert_eq!(world.resource::<GomokuBoard>().cell(7, 7), HUMAN);
     }
 
     fn fast_gomoku_world() -> World {

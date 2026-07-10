@@ -1,6 +1,7 @@
 use std::{
     sync::{Arc, Mutex, mpsc},
     thread,
+    time::{Duration, Instant},
 };
 
 use bevy::{
@@ -30,6 +31,7 @@ const RED: i64 = 1;
 const BLACK: i64 = -1;
 const MOVE_TAB: usize = 0;
 const AI_TAB: usize = 1;
+const AI_TAKEOVER_MOVE_DELAY: Duration = Duration::from_secs(1);
 const SCRIPT_TITLES: &[&str] = &["move.rss", "ai.rss"];
 const XIANGQI_MOVE_PREFIX: &str = "let from_x: int = 4;\nlet from_y: int = 6;\nlet to_x: int = 4;\nlet to_y: int = 5;\nlet player: int = 1;\n";
 const XIANGQI_AI_PREFIX: &str = "let ai_player: int = -1;\n";
@@ -47,6 +49,7 @@ struct XiangqiUiState {
     selected: Option<(i64, i64)>,
     current_player: i64,
     ai_takeover: f32,
+    last_ai_takeover_move_at: Option<Instant>,
     winner: i64,
     last_ai_move: Option<XiangqiAiMove>,
     jit_enabled: bool,
@@ -63,6 +66,7 @@ impl Default for XiangqiUiState {
             selected: None,
             current_player: RED,
             ai_takeover: 0.0,
+            last_ai_takeover_move_at: None,
             winner: 0,
             last_ai_move: None,
             jit_enabled: true,
@@ -158,8 +162,6 @@ fn run_script_smoke() {
     let human_moves = [(4, 6, 4, 5), (1, 9, 2, 7), (0, 9, 0, 8), (4, 5, 4, 4)];
     let mut turns = 0;
     let mut winner = 0;
-    let mut jit_enabled = false;
-    let mut jit_traces = 0;
     let mut ai_move_us = 0;
 
     for &(from_x, from_y, to_x, to_y) in &human_moves {
@@ -177,8 +179,6 @@ fn run_script_smoke() {
 
         let ai_move =
             choose_xiangqi_ai_move(&mut world, AI_SCRIPT, BLACK).expect("AI script should run");
-        jit_enabled = ai_move.telemetry.jit_enabled;
-        jit_traces = ai_move.telemetry.jit_trace_count;
         ai_move_us = ai_move.telemetry.elapsed_micros;
         let ai = apply_xiangqi_move_script(
             &mut world,
@@ -206,9 +206,7 @@ fn run_script_smoke() {
         .iter()
         .filter(|&&piece| piece != 0)
         .count();
-    println!(
-        "xiangqi_turns={turns}, pieces={pieces}, winner={winner}, jit_enabled={jit_enabled}, jit_traces={jit_traces}, ai_move_us={ai_move_us}"
-    );
+    println!("xiangqi_turns={turns}, pieces={pieces}, winner={winner}, ai_move_us={ai_move_us}");
 }
 
 fn xiangqi_ui(world: &mut World) {
@@ -336,6 +334,8 @@ fn xiangqi_ui(world: &mut World) {
                             if changed {
                                 state.ai_takeover =
                                     if state.ai_takeover >= 0.5 { 1.0 } else { 0.0 };
+                                state.last_ai_takeover_move_at =
+                                    xiangqi_ai_takeover_enabled(&state).then(Instant::now);
                                 state.selected = None;
                                 if xiangqi_ai_takeover_enabled(&state) && state.winner == 0 {
                                     state.message = format!(
@@ -382,6 +382,7 @@ fn xiangqi_ui(world: &mut World) {
                 state.message = "Imported board and scripts".to_string();
                 state.selected = None;
                 state.current_player = RED;
+                state.last_ai_takeover_move_at = None;
                 state.winner = 0;
                 state.last_ai_move = None;
                 state.board_io_status = format!("Loaded {}", board_save::display_file_name(&path));
@@ -678,12 +679,24 @@ fn play_human_turn(world: &mut World, from_x: i64, from_y: i64, to_x: i64, to_y:
 }
 
 fn maybe_run_xiangqi_ai_turn(world: &mut World) {
+    maybe_run_xiangqi_ai_turn_at(world, Instant::now());
+}
+
+fn maybe_run_xiangqi_ai_turn_at(world: &mut World, now: Instant) {
     let state = world.resource::<XiangqiUiState>().clone();
     if state.winner != 0 {
         return;
     }
     let player = state.current_player;
-    if player != BLACK && !xiangqi_ai_takeover_enabled(&state) {
+    let takeover_enabled = xiangqi_ai_takeover_enabled(&state);
+    if player != BLACK && !takeover_enabled {
+        return;
+    }
+    if takeover_enabled
+        && state
+            .last_ai_takeover_move_at
+            .is_some_and(|last| now.duration_since(last) < AI_TAKEOVER_MOVE_DELAY)
+    {
         return;
     }
     let scripts = world.resource::<XiangqiScripts>();
@@ -691,6 +704,11 @@ fn maybe_run_xiangqi_ai_turn(world: &mut World) {
         return;
     }
     play_xiangqi_ai_turn(world, player);
+    if takeover_enabled {
+        world
+            .resource_mut::<XiangqiUiState>()
+            .last_ai_takeover_move_at = Some(now);
+    }
 }
 
 fn play_xiangqi_ai_turn(world: &mut World, player: i64) {
@@ -960,6 +978,9 @@ fn poll_xiangqi_ai_debug_result(
             state.last_ai_move = Some(ai_move);
             if summary.winner == 0 {
                 state.current_player = other_xiangqi_player(player);
+                if xiangqi_ai_takeover_enabled(state) {
+                    state.last_ai_takeover_move_at = Some(Instant::now());
+                }
             }
             state.message = if summary.winner == RED {
                 "Red wins".to_string()
@@ -1196,14 +1217,32 @@ mod tests {
     fn ai_takeover_advances_both_xiangqi_sides() {
         let mut world = fast_xiangqi_world();
         world.resource_mut::<XiangqiUiState>().ai_takeover = 1.0;
+        let now = Instant::now();
 
-        maybe_run_xiangqi_ai_turn(&mut world);
+        maybe_run_xiangqi_ai_turn_at(&mut world, now);
         assert_eq!(world.resource::<XiangqiBoard>().cell(4, 5), 7);
         assert_eq!(world.resource::<XiangqiUiState>().current_player, BLACK);
 
-        maybe_run_xiangqi_ai_turn(&mut world);
+        maybe_run_xiangqi_ai_turn_at(&mut world, now + AI_TAKEOVER_MOVE_DELAY);
         assert_eq!(world.resource::<XiangqiBoard>().cell(4, 4), -7);
         assert_eq!(world.resource::<XiangqiUiState>().current_player, RED);
+    }
+
+    #[test]
+    fn ai_takeover_waits_between_xiangqi_moves() {
+        let mut world = fast_xiangqi_world();
+        let now = Instant::now();
+        {
+            let mut state = world.resource_mut::<XiangqiUiState>();
+            state.ai_takeover = 1.0;
+            state.last_ai_takeover_move_at = Some(now);
+        }
+
+        maybe_run_xiangqi_ai_turn_at(&mut world, now + Duration::from_millis(999));
+        assert_eq!(world.resource::<XiangqiBoard>().cell(4, 5), 0);
+
+        maybe_run_xiangqi_ai_turn_at(&mut world, now + AI_TAKEOVER_MOVE_DELAY);
+        assert_eq!(world.resource::<XiangqiBoard>().cell(4, 5), 7);
     }
 
     fn fast_xiangqi_world() -> World {
