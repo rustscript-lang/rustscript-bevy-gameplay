@@ -50,7 +50,7 @@ fn gomoku_ai_self_play_is_legal_deterministic_and_responsive() {
         .count() as u128;
     assert_eq!(stones, plies);
     assert!(
-        plies >= 8,
+        plies >= 18,
         "self-play ended before exercising midgame search"
     );
     let average_micros = ai_micros / plies;

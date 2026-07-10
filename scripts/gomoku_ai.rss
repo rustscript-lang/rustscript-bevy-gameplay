@@ -211,6 +211,10 @@ let mut enemy_win_x = -1;
 let mut enemy_win_y = -1;
 let mut enemy_win_distance = 1000;
 let mut enemy_wins = 0;
+let mut enemy_four_x = -1;
+let mut enemy_four_y = -1;
+let mut enemy_four_score = -1;
+let mut enemy_four_distance = 1000;
 let mut scan_y = 0;
 while scan_y < 15 {
     let mut scan_x = 0;
@@ -234,6 +238,18 @@ while scan_y < 15 {
                         enemy_win_y = scan_y;
                         enemy_win_distance = distance;
                     }
+                } else {
+                    let enemy_threat = threat_score(&board, scan_x, scan_y, opponent);
+                    let enemy_followup_wins = winning_extensions(&board, scan_x, scan_y, opponent, 1);
+                    if enemy_followup_wins > 0 && (
+                        enemy_threat > enemy_four_score ||
+                        (enemy_threat == enemy_four_score && distance < enemy_four_distance)
+                    ) {
+                        enemy_four_x = scan_x;
+                        enemy_four_y = scan_y;
+                        enemy_four_score = enemy_threat;
+                        enemy_four_distance = distance;
+                    }
                 }
                 board[scan_y * 15 + scan_x] = 0;
             }
@@ -255,6 +271,10 @@ if stones == 0 {
             best_x = enemy_win_x;
             best_y = enemy_win_y;
         } else {
+            if enemy_four_x >= 0 {
+                best_x = enemy_four_x;
+                best_y = enemy_four_y;
+            } else {
             let mut top_x: [int] = [-1, -1, -1, -1, -1, -1, -1, -1];
             let mut top_y: [int] = [-1, -1, -1, -1, -1, -1, -1, -1];
             let mut top_score: [int] = [
@@ -290,11 +310,15 @@ if stones == 0 {
                                 if defense >= 120000 {
                                     order = 1200000000 + defense - distance;
                                 } else {
-                                    if own_wins == 1 {
-                                        order = order + 18000000;
-                                    }
-                                    if enemy_extensions == 1 {
-                                        order = order + 12000000;
+                                    if defense >= 32000 {
+                                        order = 900000000 + defense - distance;
+                                    } else {
+                                        if own_wins == 1 {
+                                            order = order + 18000000;
+                                        }
+                                        if enemy_extensions == 1 {
+                                            order = order + 12000000;
+                                        }
                                     }
                                 }
                             }
@@ -454,6 +478,7 @@ if stones == 0 {
                     best_y = root_y;
                 }
                 root = root + 1;
+            }
             }
             }
         }

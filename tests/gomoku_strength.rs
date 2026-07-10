@@ -257,6 +257,31 @@ fn ai_rejects_a_one_ply_blunder_that_allows_an_enemy_fork() {
 }
 
 #[test]
+fn ai_blocks_an_enemy_open_three_before_chasing_shapes() {
+    let board = seeded_board(&[
+        (7, 7, 1),
+        (7, 6, 2),
+        (6, 7, 1),
+        (8, 7, 2),
+        (6, 5, 1),
+        (6, 6, 2),
+        (8, 6, 1),
+        (5, 6, 2),
+        (4, 6, 1),
+        (5, 7, 2),
+        (7, 5, 1),
+        (9, 5, 2),
+        (5, 5, 1),
+    ]);
+
+    let (x, y, _) = choose(&board, 2);
+    assert!(
+        [(4, 5), (8, 5)].contains(&(x, y)),
+        "AI move ({x}, {y}) ignored an enemy open-three extension"
+    );
+}
+
+#[test]
 fn ai_survives_a_deterministic_tactical_match() {
     let mut board = GomokuBoard::default();
     let mut ai_moves = 0;
