@@ -513,6 +513,9 @@ fn handle_gomoku_editor_actions(
     for action in actions {
         match action {
             EditorAction::StartDebug(tab) => start_gomoku_debug_session(world, scripts, tab),
+            EditorAction::StopDebug => {
+                scripts.debug_session = None;
+            }
             EditorAction::StepDebug => {
                 if let Some(session) = scripts.debug_session.as_ref() {
                     session.command(&mut scripts.editor, "step");

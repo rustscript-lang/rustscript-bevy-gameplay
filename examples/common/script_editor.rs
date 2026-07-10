@@ -60,6 +60,7 @@ pub struct LiveScriptEditor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorAction {
     StartDebug(usize),
+    StopDebug,
     StepDebug,
     NextDebug,
     ContinueDebug,
@@ -91,37 +92,44 @@ impl DebugSession {
 
     pub fn poll(&mut self, editor: &mut LiveScriptEditor) {
         let status = self.bridge.status();
-        if self.seek_user_source && status.attached {
-            self.seek_user_source = false;
-            let target_line = self.source_line_offset.saturating_add(1);
-            let breakpoint = self.bridge.execute(
-                format!("break line {target_line}"),
-                Duration::from_millis(120),
-            );
-            let resumed = match breakpoint {
-                Ok(_) => {
-                    self.temporary_line_breakpoint = Some(target_line);
-                    self.bridge.execute("continue", Duration::from_millis(120))
-                }
-                Err(err) => Err(err),
-            };
-            if let Err(err) = resumed {
-                self.temporary_line_breakpoint = None;
-                editor.debug_starting = false;
-                append_debug_output(editor, &format!("{err}\n"));
-            }
-        }
-
-        let status = self.bridge.status();
         let visible_line = visible_debug_line(status.current_line, self.source_line_offset);
-        if status.attached
-            && visible_line.is_some()
-            && let Some(target_line) = self.temporary_line_breakpoint.take()
-        {
-            let _ = self.bridge.execute(
-                format!("clear line {target_line}"),
-                Duration::from_millis(120),
-            );
+        if self.seek_user_source && status.attached {
+            if visible_line.is_some() {
+                if let Some(target_line) = self.temporary_line_breakpoint {
+                    match self.bridge.execute(
+                        format!("clear line {target_line}"),
+                        Duration::from_millis(120),
+                    ) {
+                        Ok(_) => {
+                            self.temporary_line_breakpoint = None;
+                            self.seek_user_source = false;
+                        }
+                        Err(err) => append_debug_output(editor, &format!("{err}\n")),
+                    }
+                } else {
+                    self.seek_user_source = false;
+                }
+            } else if self.temporary_line_breakpoint.is_some() {
+                if let Err(err) = self.bridge.execute("continue", Duration::from_millis(120)) {
+                    append_debug_output(editor, &format!("{err}\n"));
+                }
+            } else {
+                let target_line = self.source_line_offset.saturating_add(1);
+                match self.bridge.execute(
+                    format!("break line {target_line}"),
+                    Duration::from_millis(120),
+                ) {
+                    Ok(_) => {
+                        self.temporary_line_breakpoint = Some(target_line);
+                        if let Err(err) =
+                            self.bridge.execute("continue", Duration::from_millis(120))
+                        {
+                            append_debug_output(editor, &format!("{err}\n"));
+                        }
+                    }
+                    Err(err) => append_debug_output(editor, &format!("{err}\n")),
+                }
+            }
         }
 
         let status = self.bridge.status();
@@ -157,6 +165,12 @@ impl DebugSession {
                 append_debug_output(editor, &format!("{err}\n"));
             }
         }
+    }
+}
+
+impl Drop for DebugSession {
+    fn drop(&mut self) {
+        self.bridge.close();
     }
 }
 
@@ -198,6 +212,15 @@ impl LiveScriptEditor {
         self.debug_line = None;
         self.debug_attached = false;
         self.debug_starting = true;
+    }
+
+    pub fn reset_active_tab(&mut self, active: usize) -> EditorAction {
+        let _ = self.reset_tab_to_default(active);
+        self.debug_output.clear();
+        self.debug_line = None;
+        self.debug_attached = false;
+        self.debug_starting = false;
+        EditorAction::StopDebug
     }
 
     pub fn active_source(&self, index: usize) -> &str {
@@ -272,11 +295,7 @@ impl LiveScriptEditor {
         let active = self.active.min(self.tabs.len().saturating_sub(1));
         ui.horizontal_wrapped(|ui| {
             if ui.button("Reset").clicked() {
-                let _ = self.reset_tab_to_default(active);
-                self.debug_output.clear();
-                self.debug_line = None;
-                self.debug_attached = false;
-                self.debug_starting = false;
+                actions.push(self.reset_active_tab(active));
             }
             let debug_label = if self.debug_starting {
                 "Starting..."
@@ -911,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_active_tab_restores_default_source() {
+    fn reset_active_tab_restores_default_source_and_stops_debugging() {
         let mut editor = LiveScriptEditor::new(vec![ScriptTab::new(
             "move.rss",
             "let ok: int = 1;",
@@ -919,12 +938,21 @@ mod tests {
             HOSTS,
         )]);
         editor.set_source(0, "let changed: int = 2;").unwrap();
+        editor.debug_starting = true;
+        editor.debug_attached = true;
+        editor.debug_line = Some(8);
+        editor.debug_output = "old output".to_string();
 
-        editor.reset_tab_to_default(0).unwrap();
+        let action = editor.reset_active_tab(0);
 
+        assert_eq!(action, EditorAction::StopDebug);
         assert_eq!(editor.tabs[0].buffer, "let ok: int = 1;");
         assert_eq!(editor.tabs[0].active_source, "let ok: int = 1;");
         assert_eq!(editor.tabs[0].status, "Applied");
+        assert!(!editor.debug_starting);
+        assert!(!editor.debug_attached);
+        assert_eq!(editor.debug_line, None);
+        assert!(editor.debug_output.is_empty());
     }
 
     #[test]
@@ -995,5 +1023,30 @@ mod tests {
         assert_eq!(editor.debug_line, Some(1));
         session.command(&mut editor, "continue");
         join.join().unwrap();
+    }
+
+    #[test]
+    fn dropping_debug_session_closes_pending_bridge() {
+        use std::{sync::mpsc, thread};
+        use vm::{Debugger, Vm};
+
+        let compiled = compile_source("let value: int = 1;\n").unwrap();
+        let bridge = DebugCommandBridge::new();
+        let thread_bridge = bridge.clone();
+        let (_sender, receiver) = mpsc::channel();
+        let session = DebugSession::new(bridge, receiver, 0);
+
+        drop(session);
+
+        let (done_sender, done_receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let mut debugger = Debugger::with_command_bridge(thread_bridge);
+            debugger.stop_on_entry();
+            let mut vm = Vm::new(compiled.program);
+            let _ = vm.run_with_debugger(&mut debugger);
+            let _ = done_sender.send(());
+        });
+
+        assert!(done_receiver.recv_timeout(Duration::from_secs(1)).is_ok());
     }
 }
