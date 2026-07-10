@@ -311,6 +311,7 @@ fn ai_survives_a_deterministic_tactical_match() {
 }
 
 #[test]
+#[cfg(not(debug_assertions))]
 fn tactical_suite_has_practical_release_latency() {
     let cases = [
         seeded_board(&[(7, 7, 1)]),

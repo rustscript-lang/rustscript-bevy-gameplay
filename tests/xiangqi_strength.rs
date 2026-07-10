@@ -47,10 +47,12 @@ fn choose(world: &mut bevy_ecs::world::World, side: i64, label: &str) -> Xiangqi
         ai_move.telemetry.jit_enabled,
         "{label}: JIT must be enabled"
     );
-    assert!(
-        ai_move.telemetry.elapsed_micros < 8_000_000,
-        "{label}: move exceeded the interactive latency budget"
-    );
+    if !cfg!(debug_assertions) {
+        assert!(
+            ai_move.telemetry.elapsed_micros < 8_000_000,
+            "{label}: move exceeded the interactive latency budget"
+        );
+    }
     ai_move
 }
 
