@@ -117,19 +117,31 @@ fn main() {
     let (window_width, window_height) = initial_window_resolution();
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.075, 0.085, 0.095)))
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "RustScript Gomoku".to_string(),
-                resolution: WindowResolution::new(window_width, window_height),
-                resizable: true,
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(bevy::log::LogPlugin {
+                    filter: runtime_log_filter().to_string(),
+                    level: bevy::log::Level::WARN,
+                    ..default()
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "RustScript Gomoku".to_string(),
+                        resolution: WindowResolution::new(window_width, window_height),
+                        resizable: true,
+                        ..default()
+                    }),
+                    ..default()
+                }),
+        )
         .add_plugins(EguiPlugin::default())
         .add_systems(Startup, setup)
         .add_systems(EguiPrimaryContextPass, gomoku_ui)
         .run();
+}
+
+fn runtime_log_filter() -> &'static str {
+    "warn,cranelift_codegen=off,cranelift_jit=off,cranelift_module=off,cranelift_native=off,pd_vm=off,vm=off"
 }
 
 fn initial_window_resolution() -> (u32, u32) {
@@ -956,6 +968,15 @@ mod tests {
     }
 
     #[test]
+    fn runtime_log_filter_disables_jit_backend_logs() {
+        let filter = runtime_log_filter();
+
+        assert!(filter.contains("cranelift_codegen=off"));
+        assert!(filter.contains("cranelift_jit=off"));
+        assert!(filter.contains("pd_vm=off"));
+    }
+
+    #[test]
     fn centered_board_padding_balances_side_gaps() {
         let available_width = 700.0;
         let board_width = 640.0;
@@ -1033,6 +1054,13 @@ mod tests {
 
         maybe_run_gomoku_ai_turn_at(&mut world, now + AI_TAKEOVER_MOVE_DELAY);
         assert_eq!(world.resource::<GomokuBoard>().cell(7, 7), HUMAN);
+        assert!(
+            world
+                .resource::<GomokuUiState>()
+                .last_ai_move_micros
+                .is_some_and(|micros| micros < 1_000_000),
+            "AI move telemetry should not include the 1s takeover delay"
+        );
     }
 
     fn fast_gomoku_world() -> World {
