@@ -203,6 +203,10 @@ let mut best_x = -1;
 let mut best_y = -1;
 let mut best_score = -2000000000;
 let mut stones = 0;
+let mut min_stone_x = 15;
+let mut min_stone_y = 15;
+let mut max_stone_x = -1;
+let mut max_stone_y = -1;
 
 let mut own_win_x = -1;
 let mut own_win_y = -1;
@@ -221,6 +225,18 @@ while scan_y < 15 {
     while scan_x < 15 {
         if (&board)[scan_y * 15 + scan_x] != 0 {
             stones = stones + 1;
+            if scan_x < min_stone_x {
+                min_stone_x = scan_x;
+            }
+            if scan_y < min_stone_y {
+                min_stone_y = scan_y;
+            }
+            if scan_x > max_stone_x {
+                max_stone_x = scan_x;
+            }
+            if scan_y > max_stone_y {
+                max_stone_y = scan_y;
+            }
         } else {
             if has_neighbor(&board, scan_x, scan_y) {
                 let distance = abs_int(scan_x - center) + abs_int(scan_y - center);
@@ -239,16 +255,16 @@ while scan_y < 15 {
                         enemy_win_distance = distance;
                     }
                 } else {
-                    let enemy_threat = threat_score(&board, scan_x, scan_y, opponent);
                     let enemy_followup_wins = winning_extensions(&board, scan_x, scan_y, opponent, 1);
-                    if enemy_followup_wins > 0 && (
-                        enemy_threat > enemy_four_score ||
-                        (enemy_threat == enemy_four_score && distance < enemy_four_distance)
-                    ) {
-                        enemy_four_x = scan_x;
-                        enemy_four_y = scan_y;
-                        enemy_four_score = enemy_threat;
-                        enemy_four_distance = distance;
+                    if enemy_followup_wins > 0 {
+                        let enemy_threat = threat_score(&board, scan_x, scan_y, opponent);
+                        if enemy_threat > enemy_four_score ||
+                            (enemy_threat == enemy_four_score && distance < enemy_four_distance) {
+                            enemy_four_x = scan_x;
+                            enemy_four_y = scan_y;
+                            enemy_four_score = enemy_threat;
+                            enemy_four_distance = distance;
+                        }
                     }
                 }
                 board[scan_y * 15 + scan_x] = 0;
@@ -271,6 +287,14 @@ if stones == 0 {
             best_x = enemy_win_x;
             best_y = enemy_win_y;
         } else {
+            let search_min_x: int = if min_stone_x > 2 => { min_stone_x - 2 } else => { 0 };
+            let search_min_y: int = if min_stone_y > 2 => { min_stone_y - 2 } else => { 0 };
+            let search_max_x: int = if max_stone_x < 12 => { max_stone_x + 2 } else => { 14 };
+            let search_max_y: int = if max_stone_y < 12 => { max_stone_y + 2 } else => { 14 };
+            let reply_min_x: int = if min_stone_x > 3 => { min_stone_x - 3 } else => { 0 };
+            let reply_min_y: int = if min_stone_y > 3 => { min_stone_y - 3 } else => { 0 };
+            let reply_max_x: int = if max_stone_x < 11 => { max_stone_x + 3 } else => { 14 };
+            let reply_max_y: int = if max_stone_y < 11 => { max_stone_y + 3 } else => { 14 };
             if enemy_four_x >= 0 {
                 best_x = enemy_four_x;
                 best_y = enemy_four_y;
@@ -282,10 +306,10 @@ if stones == 0 {
                 -2000000000, -2000000000, -2000000000, -2000000000
             ];
             let mut top_own_wins: [int] = [0, 0, 0, 0, 0, 0, 0, 0];
-            let mut y = 0;
-            while y < 15 {
-                let mut x = 0;
-                while x < 15 {
+            let mut y = search_min_y;
+            while y <= search_max_y {
+                let mut x = search_min_x;
+                while x <= search_max_x {
                     if (&board)[y * 15 + x] == 0 && has_close_neighbor(&board, x, y) {
                         board[y * 15 + x] = ai_player;
                         let attack = threat_score(&board, x, y, ai_player);
@@ -371,10 +395,10 @@ if stones == 0 {
                     let mut reply_attack: [int] = [0, 0, 0, 0, 0, 0, 0, 0];
                     let mut reply_extensions: [int] = [0, 0, 0, 0, 0, 0, 0, 0];
                     let mut reply_won: [int] = [0, 0, 0, 0, 0, 0, 0, 0];
-                    let mut reply_y_scan = 0;
-                    while reply_y_scan < 15 {
-                        let mut reply_x_scan = 0;
-                        while reply_x_scan < 15 {
+                    let mut reply_y_scan = reply_min_y;
+                    while reply_y_scan <= reply_max_y {
+                        let mut reply_x_scan = reply_min_x;
+                        while reply_x_scan <= reply_max_x {
                             if (&board)[reply_y_scan * 15 + reply_x_scan] == 0 &&
                                 has_close_neighbor(&board, reply_x_scan, reply_y_scan) {
                                 board[reply_y_scan * 15 + reply_x_scan] = opponent;
