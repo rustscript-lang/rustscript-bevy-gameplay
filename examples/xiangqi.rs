@@ -45,6 +45,8 @@ const XIANGQI_HOST_APIS: &[&str] = &[
 struct XiangqiUiState {
     message: String,
     selected: Option<(i64, i64)>,
+    current_player: i64,
+    ai_takeover: f32,
     winner: i64,
     last_ai_move: Option<XiangqiAiMove>,
     jit_enabled: bool,
@@ -59,6 +61,8 @@ impl Default for XiangqiUiState {
         Self {
             message: "Red to move".to_string(),
             selected: None,
+            current_player: RED,
+            ai_takeover: 0.0,
             winner: 0,
             last_ai_move: None,
             jit_enabled: true,
@@ -74,7 +78,12 @@ impl Default for XiangqiUiState {
 struct XiangqiScripts {
     editor: LiveScriptEditor,
     debug_session: Option<DebugSession>,
-    pending_ai_debug: Option<Arc<Mutex<mpsc::Receiver<Result<XiangqiAiMove, String>>>>>,
+    pending_ai_debug: Option<PendingXiangqiAiDebug>,
+}
+
+struct PendingXiangqiAiDebug {
+    player: i64,
+    receiver: Arc<Mutex<mpsc::Receiver<Result<XiangqiAiMove, String>>>>,
 }
 
 impl Default for XiangqiScripts {
@@ -311,6 +320,46 @@ fn xiangqi_ui(world: &mut World) {
                                     .color(egui::Color32::from_rgb(176, 185, 188)),
                             );
                         }
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("AI Assist")
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(176, 185, 188)),
+                            );
+                            let changed = ui
+                                .add(
+                                    egui::Slider::new(&mut state.ai_takeover, 0.0..=1.0)
+                                        .show_value(false)
+                                        .clamping(egui::SliderClamping::Always),
+                                )
+                                .changed();
+                            if changed {
+                                state.ai_takeover =
+                                    if state.ai_takeover >= 0.5 { 1.0 } else { 0.0 };
+                                state.selected = None;
+                                if xiangqi_ai_takeover_enabled(&state) && state.winner == 0 {
+                                    state.message = format!(
+                                        "{} AI to move",
+                                        xiangqi_player_label(state.current_player)
+                                    );
+                                } else if state.winner == 0 {
+                                    state.message = if state.current_player == RED {
+                                        "Red to move".to_string()
+                                    } else {
+                                        "AI thinking".to_string()
+                                    };
+                                }
+                            }
+                            ui.label(
+                                egui::RichText::new(if xiangqi_ai_takeover_enabled(&state) {
+                                    "On"
+                                } else {
+                                    "Off"
+                                })
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(176, 185, 188)),
+                            );
+                        });
                         ui.separator();
                         editor_actions = scripts.editor.ui(ui);
                     },
@@ -332,6 +381,7 @@ fn xiangqi_ui(world: &mut World) {
             Ok(()) => {
                 state.message = "Imported board and scripts".to_string();
                 state.selected = None;
+                state.current_player = RED;
                 state.winner = 0;
                 state.last_ai_move = None;
                 state.board_io_status = format!("Loaded {}", board_save::display_file_name(&path));
@@ -354,6 +404,7 @@ fn xiangqi_ui(world: &mut World) {
     if let Some((x, y)) = clicked {
         handle_click(world, x, y);
     }
+    maybe_run_xiangqi_ai_turn(world);
 }
 
 fn draw_board(
@@ -575,7 +626,7 @@ fn import_xiangqi_save(
 
 fn handle_click(world: &mut World, x: i64, y: i64) {
     let state = world.resource::<XiangqiUiState>().clone();
-    if state.winner != 0 {
+    if state.winner != 0 || state.current_player != RED || xiangqi_ai_takeover_enabled(&state) {
         return;
     }
     let piece = world.resource::<XiangqiBoard>().cell(x, y);
@@ -599,13 +650,11 @@ fn handle_click(world: &mut World, x: i64, y: i64) {
 }
 
 fn play_human_turn(world: &mut World, from_x: i64, from_y: i64, to_x: i64, to_y: i64) {
-    let (move_script, ai_script) = {
-        let scripts = world.resource::<XiangqiScripts>();
-        (
-            scripts.editor.active_source(MOVE_TAB).to_string(),
-            scripts.editor.active_source(AI_TAB).to_string(),
-        )
-    };
+    let move_script = world
+        .resource::<XiangqiScripts>()
+        .editor
+        .active_source(MOVE_TAB)
+        .to_string();
     let human =
         match apply_xiangqi_move_script(world, &move_script, from_x, from_y, to_x, to_y, RED) {
             Ok(summary) => summary,
@@ -625,9 +674,36 @@ fn play_human_turn(world: &mut World, from_x: i64, from_y: i64, to_x: i64, to_y:
     if human.winner != 0 {
         return;
     }
+    world.resource_mut::<XiangqiUiState>().current_player = BLACK;
+}
 
+fn maybe_run_xiangqi_ai_turn(world: &mut World) {
+    let state = world.resource::<XiangqiUiState>().clone();
+    if state.winner != 0 {
+        return;
+    }
+    let player = state.current_player;
+    if player != BLACK && !xiangqi_ai_takeover_enabled(&state) {
+        return;
+    }
+    let scripts = world.resource::<XiangqiScripts>();
+    if scripts.debug_session.is_some() || scripts.pending_ai_debug.is_some() {
+        return;
+    }
+    play_xiangqi_ai_turn(world, player);
+}
+
+fn play_xiangqi_ai_turn(world: &mut World, player: i64) {
+    let (move_script, ai_script) = {
+        let scripts = world.resource::<XiangqiScripts>();
+        (
+            scripts.editor.active_source(MOVE_TAB).to_string(),
+            scripts.editor.active_source(AI_TAB).to_string(),
+        )
+    };
     if let Some(mut scripts) = world.remove_resource::<XiangqiScripts>() {
-        let started_debug = start_xiangqi_ai_debug_for_turn(world, &mut scripts, ai_script.clone());
+        let started_debug =
+            start_xiangqi_ai_debug_for_turn(world, &mut scripts, ai_script.clone(), player);
         world.insert_resource(scripts);
         if started_debug {
             let mut state = world.resource_mut::<XiangqiUiState>();
@@ -637,7 +713,7 @@ fn play_human_turn(world: &mut World, from_x: i64, from_y: i64, to_x: i64, to_y:
         }
     }
 
-    let ai_move = match choose_xiangqi_ai_move(world, &ai_script, BLACK) {
+    let ai_move = match choose_xiangqi_ai_move(world, &ai_script, player) {
         Ok(ai_move) => ai_move,
         Err(err) => {
             let mut state = world.resource_mut::<XiangqiUiState>();
@@ -653,7 +729,7 @@ fn play_human_turn(world: &mut World, from_x: i64, from_y: i64, to_x: i64, to_y:
         ai_move.from_y,
         ai_move.to_x,
         ai_move.to_y,
-        BLACK,
+        player,
     ) {
         Ok(summary) => summary,
         Err(err) => {
@@ -669,7 +745,15 @@ fn play_human_turn(world: &mut World, from_x: i64, from_y: i64, to_x: i64, to_y:
         return;
     }
     world.resource_mut::<XiangqiUiState>().last_ai_move = Some(ai_move);
-    publish_move_state(world, ai, "Red to move");
+    let message = if xiangqi_ai_takeover_enabled(world.resource::<XiangqiUiState>()) {
+        format!("{} AI moved", xiangqi_player_label(player))
+    } else {
+        "Red to move".to_string()
+    };
+    publish_move_state(world, ai, &message);
+    if ai.winner == 0 {
+        world.resource_mut::<XiangqiUiState>().current_player = other_xiangqi_player(player);
+    }
 }
 
 fn handle_xiangqi_editor_actions(
@@ -776,6 +860,7 @@ fn start_xiangqi_ai_debug_for_turn(
     world: &mut World,
     scripts: &mut XiangqiScripts,
     source: String,
+    player: i64,
 ) -> bool {
     if !(scripts.editor.debug_pending && scripts.editor.debug_tab == Some(AI_TAB)) {
         return false;
@@ -791,7 +876,7 @@ fn start_xiangqi_ai_debug_for_turn(
         debug_world.insert_resource(board);
         let mut debugger = Debugger::with_command_bridge(thread_bridge);
         debugger.stop_on_entry();
-        let result = debug_xiangqi_ai_script(&mut debug_world, &source, BLACK, &mut debugger);
+        let result = debug_xiangqi_ai_script(&mut debug_world, &source, player, &mut debugger);
         let output = result
             .as_ref()
             .map(|mv| {
@@ -812,7 +897,10 @@ fn start_xiangqi_ai_debug_for_turn(
         source_line_offset,
         scripts.editor.user_breakpoints(AI_TAB),
     ));
-    scripts.pending_ai_debug = Some(Arc::new(Mutex::new(result_receiver)));
+    scripts.pending_ai_debug = Some(PendingXiangqiAiDebug {
+        player,
+        receiver: Arc::new(Mutex::new(result_receiver)),
+    });
     true
 }
 
@@ -821,11 +909,12 @@ fn poll_xiangqi_ai_debug_result(
     scripts: &mut XiangqiScripts,
     state: &mut XiangqiUiState,
 ) {
-    let Some(receiver) = scripts.pending_ai_debug.as_ref() else {
+    let Some(pending) = scripts.pending_ai_debug.as_ref() else {
         return;
     };
+    let player = pending.player;
     let result = {
-        let Ok(receiver) = receiver.lock() else {
+        let Ok(receiver) = pending.receiver.lock() else {
             scripts.pending_ai_debug = None;
             state.message = "AI debug channel error".to_string();
             state.selected = None;
@@ -863,16 +952,21 @@ fn poll_xiangqi_ai_debug_result(
         ai_move.from_y,
         ai_move.to_x,
         ai_move.to_y,
-        BLACK,
+        player,
     ) {
         Ok(summary) if summary.legal => {
             state.selected = None;
             state.winner = summary.winner;
             state.last_ai_move = Some(ai_move);
+            if summary.winner == 0 {
+                state.current_player = other_xiangqi_player(player);
+            }
             state.message = if summary.winner == RED {
                 "Red wins".to_string()
             } else if summary.winner == BLACK {
                 "Black wins".to_string()
+            } else if xiangqi_ai_takeover_enabled(state) {
+                format!("{} AI moved", xiangqi_player_label(player))
             } else {
                 "Red to move".to_string()
             };
@@ -909,6 +1003,18 @@ fn record_ai_telemetry(
     state.jit_enabled = telemetry.jit_enabled;
     state.jit_trace_count = telemetry.jit_trace_count;
     state.last_ai_move_micros = Some(telemetry.elapsed_micros);
+}
+
+fn other_xiangqi_player(player: i64) -> i64 {
+    if player == RED { BLACK } else { RED }
+}
+
+fn xiangqi_ai_takeover_enabled(state: &XiangqiUiState) -> bool {
+    state.ai_takeover >= 0.5
+}
+
+fn xiangqi_player_label(player: i64) -> &'static str {
+    if player == RED { "Red" } else { "Black" }
 }
 
 fn status_text(state: &XiangqiUiState) -> egui::RichText {
@@ -1073,5 +1179,46 @@ mod tests {
         assert_eq!(world.resource::<XiangqiBoard>().cell(4, 9), RED);
         assert_eq!(loaded_scripts.editor.active_source(MOVE_TAB), move_source);
         assert_eq!(loaded_scripts.editor.active_source(AI_TAB), ai_source);
+    }
+
+    #[test]
+    fn ai_takeover_blocks_human_selection() {
+        let mut world = fast_xiangqi_world();
+        world.resource_mut::<XiangqiUiState>().ai_takeover = 1.0;
+
+        handle_click(&mut world, 4, 6);
+
+        assert_eq!(world.resource::<XiangqiUiState>().selected, None);
+        assert_eq!(world.resource::<XiangqiBoard>().cell(4, 6), 7);
+    }
+
+    #[test]
+    fn ai_takeover_advances_both_xiangqi_sides() {
+        let mut world = fast_xiangqi_world();
+        world.resource_mut::<XiangqiUiState>().ai_takeover = 1.0;
+
+        maybe_run_xiangqi_ai_turn(&mut world);
+        assert_eq!(world.resource::<XiangqiBoard>().cell(4, 5), 7);
+        assert_eq!(world.resource::<XiangqiUiState>().current_player, BLACK);
+
+        maybe_run_xiangqi_ai_turn(&mut world);
+        assert_eq!(world.resource::<XiangqiBoard>().cell(4, 4), -7);
+        assert_eq!(world.resource::<XiangqiUiState>().current_player, RED);
+    }
+
+    fn fast_xiangqi_world() -> World {
+        let mut world = World::new();
+        world.insert_resource(XiangqiBoard::default());
+        world.insert_resource(XiangqiUiState::default());
+        let mut scripts = XiangqiScripts::default();
+        scripts
+            .editor
+            .set_source(
+                AI_TAB,
+                "use bevy;\nlet from_y: int = if ai_player == 1 => { 6 } else => { 3 };\nlet to_y: int = if ai_player == 1 => { 5 } else => { 4 };\nbevy::Xiangqi::set_ai_move(4, from_y, 4, to_y);\n0;",
+            )
+            .unwrap();
+        world.insert_resource(scripts);
+        world
     }
 }

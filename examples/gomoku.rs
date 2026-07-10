@@ -44,6 +44,8 @@ const GOMOKU_HOST_APIS: &[&str] = &[
 #[derive(Resource, Clone)]
 struct GomokuUiState {
     message: String,
+    current_player: i64,
+    ai_takeover: f32,
     winner: i64,
     draw: bool,
     last_ai_move: Option<GomokuAiMove>,
@@ -57,6 +59,8 @@ impl Default for GomokuUiState {
     fn default() -> Self {
         Self {
             message: "Your turn".to_string(),
+            current_player: HUMAN,
+            ai_takeover: 0.0,
             winner: 0,
             draw: false,
             last_ai_move: None,
@@ -72,7 +76,12 @@ impl Default for GomokuUiState {
 struct GomokuScripts {
     editor: LiveScriptEditor,
     debug_session: Option<DebugSession>,
-    pending_ai_debug: Option<Arc<Mutex<mpsc::Receiver<Result<GomokuAiMove, String>>>>>,
+    pending_ai_debug: Option<PendingGomokuAiDebug>,
+}
+
+struct PendingGomokuAiDebug {
+    player: i64,
+    receiver: Arc<Mutex<mpsc::Receiver<Result<GomokuAiMove, String>>>>,
 }
 
 impl Default for GomokuScripts {
@@ -296,6 +305,48 @@ fn gomoku_ui(world: &mut World) {
                                     .color(egui::Color32::from_rgb(174, 184, 188)),
                             );
                         }
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("AI Assist")
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(174, 184, 188)),
+                            );
+                            let changed = ui
+                                .add(
+                                    egui::Slider::new(&mut state.ai_takeover, 0.0..=1.0)
+                                        .show_value(false)
+                                        .clamping(egui::SliderClamping::Always),
+                                )
+                                .changed();
+                            if changed {
+                                state.ai_takeover =
+                                    if state.ai_takeover >= 0.5 { 1.0 } else { 0.0 };
+                                if gomoku_ai_takeover_enabled(&state)
+                                    && state.winner == 0
+                                    && !state.draw
+                                {
+                                    state.message = format!(
+                                        "{} AI to move",
+                                        gomoku_player_label(state.current_player)
+                                    );
+                                } else if state.winner == 0 && !state.draw {
+                                    state.message = if state.current_player == HUMAN {
+                                        "Your turn".to_string()
+                                    } else {
+                                        "AI thinking".to_string()
+                                    };
+                                }
+                            }
+                            ui.label(
+                                egui::RichText::new(if gomoku_ai_takeover_enabled(&state) {
+                                    "On"
+                                } else {
+                                    "Off"
+                                })
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(174, 184, 188)),
+                            );
+                        });
                         ui.separator();
                         editor_actions = scripts.editor.ui(ui);
                     },
@@ -312,6 +363,7 @@ fn gomoku_ui(world: &mut World) {
         match import_gomoku_save(world, &mut scripts, &text) {
             Ok(()) => {
                 state.message = "Imported board and scripts".to_string();
+                state.current_player = HUMAN;
                 state.winner = 0;
                 state.draw = false;
                 state.last_ai_move = None;
@@ -335,6 +387,7 @@ fn gomoku_ui(world: &mut World) {
     if let Some((x, y)) = clicked_move {
         play_human_turn(world, x, y);
     }
+    maybe_run_gomoku_ai_turn(world);
 }
 
 fn draw_board(
@@ -472,16 +525,18 @@ fn import_gomoku_save(
 
 fn play_human_turn(world: &mut World, x: i64, y: i64) {
     let state = world.resource::<GomokuUiState>().clone();
-    if state.winner != 0 || state.draw {
+    if state.winner != 0
+        || state.draw
+        || state.current_player != HUMAN
+        || gomoku_ai_takeover_enabled(&state)
+    {
         return;
     }
-    let (move_script, ai_script) = {
-        let scripts = world.resource::<GomokuScripts>();
-        (
-            scripts.editor.active_source(MOVE_TAB).to_string(),
-            scripts.editor.active_source(AI_TAB).to_string(),
-        )
-    };
+    let move_script = world
+        .resource::<GomokuScripts>()
+        .editor
+        .active_source(MOVE_TAB)
+        .to_string();
 
     let human = match apply_gomoku_move_script(world, &move_script, x, y, HUMAN) {
         Ok(summary) => summary,
@@ -494,13 +549,39 @@ fn play_human_turn(world: &mut World, x: i64, y: i64) {
         world.resource_mut::<GomokuUiState>().message = "Point unavailable".to_string();
         return;
     }
-    publish_move_state(world, human, "Your move", None);
-    if human.winner != 0 || human.draw {
+    publish_move_state(world, human, "AI thinking", None);
+    if human.winner == 0 && !human.draw {
+        world.resource_mut::<GomokuUiState>().current_player = COMPUTER;
+    }
+}
+
+fn maybe_run_gomoku_ai_turn(world: &mut World) {
+    let state = world.resource::<GomokuUiState>().clone();
+    if state.winner != 0 || state.draw {
         return;
     }
+    let player = state.current_player;
+    if player != COMPUTER && !gomoku_ai_takeover_enabled(&state) {
+        return;
+    }
+    let scripts = world.resource::<GomokuScripts>();
+    if scripts.debug_session.is_some() || scripts.pending_ai_debug.is_some() {
+        return;
+    }
+    play_gomoku_ai_turn(world, player);
+}
 
+fn play_gomoku_ai_turn(world: &mut World, player: i64) {
+    let (move_script, ai_script) = {
+        let scripts = world.resource::<GomokuScripts>();
+        (
+            scripts.editor.active_source(MOVE_TAB).to_string(),
+            scripts.editor.active_source(AI_TAB).to_string(),
+        )
+    };
     if let Some(mut scripts) = world.remove_resource::<GomokuScripts>() {
-        let started_debug = start_gomoku_ai_debug_for_turn(world, &mut scripts, ai_script.clone());
+        let started_debug =
+            start_gomoku_ai_debug_for_turn(world, &mut scripts, ai_script.clone(), player);
         world.insert_resource(scripts);
         if started_debug {
             world.resource_mut::<GomokuUiState>().message = "AI debugger paused".to_string();
@@ -508,7 +589,7 @@ fn play_human_turn(world: &mut World, x: i64, y: i64) {
         }
     }
 
-    let ai_move = match choose_gomoku_ai_move(world, &ai_script, COMPUTER) {
+    let ai_move = match choose_gomoku_ai_move(world, &ai_script, player) {
         Ok(ai_move) => ai_move,
         Err(err) => {
             world.resource_mut::<GomokuUiState>().message = format!("AI script error: {err}");
@@ -516,7 +597,7 @@ fn play_human_turn(world: &mut World, x: i64, y: i64) {
         }
     };
     record_ai_telemetry(world, ai_move.telemetry);
-    let ai = match apply_gomoku_move_script(world, &move_script, ai_move.x, ai_move.y, COMPUTER) {
+    let ai = match apply_gomoku_move_script(world, &move_script, ai_move.x, ai_move.y, player) {
         Ok(summary) => summary,
         Err(err) => {
             world.resource_mut::<GomokuUiState>().message = format!("AI move error: {err}");
@@ -528,7 +609,15 @@ fn play_human_turn(world: &mut World, x: i64, y: i64) {
             "AI selected an unavailable point".to_string();
         return;
     }
-    publish_move_state(world, ai, "AI moved", Some(ai_move));
+    let message = if gomoku_ai_takeover_enabled(world.resource::<GomokuUiState>()) {
+        format!("{} AI moved", gomoku_player_label(player))
+    } else {
+        "AI moved".to_string()
+    };
+    publish_move_state(world, ai, &message, Some(ai_move));
+    if ai.winner == 0 && !ai.draw {
+        world.resource_mut::<GomokuUiState>().current_player = other_gomoku_player(player);
+    }
 }
 
 fn handle_gomoku_editor_actions(
@@ -639,6 +728,7 @@ fn start_gomoku_ai_debug_for_turn(
     world: &mut World,
     scripts: &mut GomokuScripts,
     source: String,
+    player: i64,
 ) -> bool {
     if !(scripts.editor.debug_pending && scripts.editor.debug_tab == Some(AI_TAB)) {
         return false;
@@ -654,7 +744,7 @@ fn start_gomoku_ai_debug_for_turn(
         debug_world.insert_resource(board);
         let mut debugger = Debugger::with_command_bridge(thread_bridge);
         debugger.stop_on_entry();
-        let result = debug_gomoku_ai_script(&mut debug_world, &source, COMPUTER, &mut debugger);
+        let result = debug_gomoku_ai_script(&mut debug_world, &source, player, &mut debugger);
         let output = result
             .as_ref()
             .map(|mv| format!("debug complete: ai=({}, {})", mv.x, mv.y))
@@ -670,7 +760,10 @@ fn start_gomoku_ai_debug_for_turn(
         source_line_offset,
         scripts.editor.user_breakpoints(AI_TAB),
     ));
-    scripts.pending_ai_debug = Some(Arc::new(Mutex::new(result_receiver)));
+    scripts.pending_ai_debug = Some(PendingGomokuAiDebug {
+        player,
+        receiver: Arc::new(Mutex::new(result_receiver)),
+    });
     true
 }
 
@@ -679,11 +772,12 @@ fn poll_gomoku_ai_debug_result(
     scripts: &mut GomokuScripts,
     state: &mut GomokuUiState,
 ) {
-    let Some(receiver) = scripts.pending_ai_debug.as_ref() else {
+    let Some(pending) = scripts.pending_ai_debug.as_ref() else {
         return;
     };
+    let player = pending.player;
     let result = {
-        let Ok(receiver) = receiver.lock() else {
+        let Ok(receiver) = pending.receiver.lock() else {
             scripts.pending_ai_debug = None;
             state.message = "AI debug channel error".to_string();
             return;
@@ -712,17 +806,22 @@ fn poll_gomoku_ai_debug_result(
     state.last_ai_move_micros = Some(ai_move.telemetry.elapsed_micros);
 
     let move_script = scripts.editor.active_source(MOVE_TAB).to_string();
-    match apply_gomoku_move_script(world, &move_script, ai_move.x, ai_move.y, COMPUTER) {
+    match apply_gomoku_move_script(world, &move_script, ai_move.x, ai_move.y, player) {
         Ok(summary) if summary.legal => {
             state.winner = summary.winner;
             state.draw = summary.draw;
             state.last_ai_move = Some(ai_move);
+            if summary.winner == 0 && !summary.draw {
+                state.current_player = other_gomoku_player(player);
+            }
             state.message = if summary.winner == HUMAN {
                 "Black wins".to_string()
             } else if summary.winner == COMPUTER {
                 "White wins".to_string()
             } else if summary.draw {
                 "Draw".to_string()
+            } else if gomoku_ai_takeover_enabled(state) {
+                format!("{} AI moved", gomoku_player_label(player))
             } else {
                 "AI moved".to_string()
             };
@@ -779,6 +878,18 @@ fn publish_move_state(
     } else {
         message.to_string()
     };
+}
+
+fn other_gomoku_player(player: i64) -> i64 {
+    if player == HUMAN { COMPUTER } else { HUMAN }
+}
+
+fn gomoku_ai_takeover_enabled(state: &GomokuUiState) -> bool {
+    state.ai_takeover >= 0.5
+}
+
+fn gomoku_player_label(player: i64) -> &'static str {
+    if player == HUMAN { "Black" } else { "White" }
 }
 
 fn status_text(state: &GomokuUiState) -> egui::RichText {
@@ -856,5 +967,46 @@ mod tests {
         assert_eq!(world.resource::<GomokuBoard>().cell(7, 7), HUMAN);
         assert_eq!(loaded_scripts.editor.active_source(MOVE_TAB), move_source);
         assert_eq!(loaded_scripts.editor.active_source(AI_TAB), ai_source);
+    }
+
+    #[test]
+    fn ai_takeover_blocks_human_clicks() {
+        let mut world = fast_gomoku_world();
+        world.resource_mut::<GomokuUiState>().ai_takeover = 1.0;
+
+        play_human_turn(&mut world, 7, 7);
+
+        assert_eq!(world.resource::<GomokuBoard>().cell(7, 7), 0);
+        assert_eq!(world.resource::<GomokuUiState>().current_player, HUMAN);
+    }
+
+    #[test]
+    fn ai_takeover_advances_both_gomoku_sides() {
+        let mut world = fast_gomoku_world();
+        world.resource_mut::<GomokuUiState>().ai_takeover = 1.0;
+
+        maybe_run_gomoku_ai_turn(&mut world);
+        assert_eq!(world.resource::<GomokuBoard>().cell(7, 7), HUMAN);
+        assert_eq!(world.resource::<GomokuUiState>().current_player, COMPUTER);
+
+        maybe_run_gomoku_ai_turn(&mut world);
+        assert_eq!(world.resource::<GomokuBoard>().cell(8, 7), COMPUTER);
+        assert_eq!(world.resource::<GomokuUiState>().current_player, HUMAN);
+    }
+
+    fn fast_gomoku_world() -> World {
+        let mut world = World::new();
+        world.insert_resource(GomokuBoard::default());
+        world.insert_resource(GomokuUiState::default());
+        let mut scripts = GomokuScripts::default();
+        scripts
+            .editor
+            .set_source(
+                AI_TAB,
+                "use bevy;\nlet x: int = if ai_player == 1 => { 7 } else => { 8 };\nbevy::Gomoku::set_ai_move(x, 7);\nx;",
+            )
+            .unwrap();
+        world.insert_resource(scripts);
+        world
     }
 }
