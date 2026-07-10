@@ -34,6 +34,7 @@ const SCRIPT_TITLES: &[&str] = &["move.rss", "ai.rss"];
 const XIANGQI_MOVE_PREFIX: &str = "let from_x: int = 4;\nlet from_y: int = 6;\nlet to_x: int = 4;\nlet to_y: int = 5;\nlet player: int = 1;\n";
 const XIANGQI_AI_PREFIX: &str = "let ai_player: int = -1;\n";
 const XIANGQI_HOST_APIS: &[&str] = &[
+    "bevy::Xiangqi::board",
     "bevy::Xiangqi::cell",
     "bevy::Xiangqi::set_cell",
     "bevy::Xiangqi::set_result",

@@ -34,6 +34,7 @@ const GOMOKU_MOVE_PREFIX: &str =
     "let move_x: int = 0;\nlet move_y: int = 0;\nlet player: int = 1;\n";
 const GOMOKU_AI_PREFIX: &str = "let ai_player: int = 2;\n";
 const GOMOKU_HOST_APIS: &[&str] = &[
+    "bevy::Gomoku::board",
     "bevy::Gomoku::cell",
     "bevy::Gomoku::set_cell",
     "bevy::Gomoku::set_result",

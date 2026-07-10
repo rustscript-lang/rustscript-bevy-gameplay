@@ -1,10 +1,22 @@
 use bevy;
 
+let mut board: [int] = bevy::Gomoku::board();
+
 fn abs_int(value: int) -> int {
     if value < 0 => { -value } else => { value }
 }
 
-fn has_neighbor(x: int, y: int, size: int) -> bool {
+fn direction_x(direction: int) -> int {
+    if direction == 1 => { 0 } else => { 1 }
+}
+
+fn direction_y(direction: int) -> int {
+    if direction == 0 => { 0 } else => {
+        if direction == 3 => { -1 } else => { 1 }
+    }
+}
+
+fn has_neighbor(board: [int], x: int, y: int) -> bool {
     let mut found = false;
     let mut dy = -2;
     while !found && dy <= 2 {
@@ -12,8 +24,8 @@ fn has_neighbor(x: int, y: int, size: int) -> bool {
         while !found && dx <= 2 {
             let px = x + dx;
             let py = y + dy;
-            if px >= 0 && px < size && py >= 0 && py < size &&
-                (dx != 0 || dy != 0) && bevy::Gomoku::cell(px, py) != 0 {
+            if px >= 0 && px < 15 && py >= 0 && py < 15 &&
+                (dx != 0 || dy != 0) && (&board)[py * 15 + px] != 0 {
                 found = true;
             }
             dx = dx + 1;
@@ -23,203 +35,432 @@ fn has_neighbor(x: int, y: int, size: int) -> bool {
     found
 }
 
-// Scores windows through the newly placed point using Rapfi-style threat classes.
-fn threat_score(x: int, y: int, stone: int) -> int {
-    let mut five = 0;
+fn has_close_neighbor(board: [int], x: int, y: int) -> bool {
+    let mut found = false;
+    let mut dy = -1;
+    while !found && dy <= 1 {
+        let mut dx = -1;
+        while !found && dx <= 1 {
+            let px = x + dx;
+            let py = y + dy;
+            if px >= 0 && px < 15 && py >= 0 && py < 15 &&
+                (dx != 0 || dy != 0) && (&board)[py * 15 + px] != 0 {
+                found = true;
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    found
+}
+
+fn line_is_five(board: [int], x: int, y: int, stone: int, dx: int, dy: int) -> bool {
+    let mut total = 1;
+    let mut step = 1;
+    let mut px = x + step * dx;
+    let mut py = y + step * dy;
+    while px >= 0 && px < 15 && py >= 0 && py < 15 && (&board)[py * 15 + px] == stone {
+        total = total + 1;
+        step = step + 1;
+        px = x + step * dx;
+        py = y + step * dy;
+    }
+    step = 1;
+    px = x - step * dx;
+    py = y - step * dy;
+    while px >= 0 && px < 15 && py >= 0 && py < 15 && (&board)[py * 15 + px] == stone {
+        total = total + 1;
+        step = step + 1;
+        px = x - step * dx;
+        py = y - step * dy;
+    }
+    total >= 5
+}
+
+fn is_five(board: [int], x: int, y: int, stone: int) -> bool {
+    let mut found = false;
+    let mut direction = 0;
+    while !found && direction < 4 {
+        found = line_is_five(
+            &board,
+            x,
+            y,
+            stone,
+            direction_x(direction),
+            direction_y(direction)
+        );
+        direction = direction + 1;
+    }
+    found
+}
+
+fn winning_extensions(board: [int], anchor_x: int, anchor_y: int, stone: int, limit: int) -> int {
+    let mut wins = 0;
+    let mut direction = 0;
+    while wins < limit && direction < 4 {
+        let dx = direction_x(direction);
+        let dy = direction_y(direction);
+        let mut offset = -4;
+        while wins < limit && offset <= 4 {
+            if offset != 0 {
+                let x = anchor_x + offset * dx;
+                let y = anchor_y + offset * dy;
+                if x >= 0 && x < 15 && y >= 0 && y < 15 && (&board)[y * 15 + x] == 0 {
+                    board[y * 15 + x] = stone;
+                    if line_is_five(&board, x, y, stone, dx, dy) {
+                        wins = wins + 1;
+                    }
+                    board[y * 15 + x] = 0;
+                }
+            }
+            offset = offset + 1;
+        }
+        direction = direction + 1;
+    }
+    wins
+}
+
+fn threat_score(board: [int], x: int, y: int, stone: int) -> int {
+    let mut five = false;
     let mut fours = 0;
     let mut threes = 0;
     let mut twos = 0;
     let mut direction = 0;
     while direction < 4 {
-        let dx = if direction == 0 => { 1 } else => {
-            if direction == 1 => { 0 } else => { 1 }
-        };
-        let dy = if direction == 0 => { 0 } else => {
-            if direction == 1 => { 1 } else => {
-                if direction == 2 => { 1 } else => { -1 }
-            }
-        };
-        let mut direction_four = 0;
-        let mut direction_three = 0;
-        let mut direction_two = 0;
+        let dx = direction_x(direction);
+        let dy = direction_y(direction);
+        if line_is_five(&board, x, y, stone, dx, dy) {
+            five = true;
+        }
+
+        let mut best_own = 0;
+        let mut four_windows = 0;
         let mut start = -4;
         while start <= 0 {
             let mut own = 0;
-            let mut empty = 0;
             let mut blocked = false;
             let mut step = 0;
             while step < 5 {
-                let cell: int = bevy::Gomoku::cell(x + (start + step) * dx, y + (start + step) * dy);
-                if cell == stone {
+                let px = x + (start + step) * dx;
+                let py = y + (start + step) * dy;
+                let current: int = if px < 0 || px >= 15 || py < 0 || py >= 15 => {
+                    3
+                } else => { (&board)[py * 15 + px] };
+                if current == stone {
                     own = own + 1;
                 } else {
-                    if cell == 0 {
-                        empty = empty + 1;
-                    } else {
+                    if current != 0 {
                         blocked = true;
                     }
                 }
                 step = step + 1;
             }
             if !blocked {
-                if own == 5 {
-                    five = five + 1;
-                } else {
-                    if own == 4 && empty == 1 {
-                        direction_four = direction_four + 1;
-                    } else {
-                        if own == 3 && empty == 2 {
-                            direction_three = direction_three + 1;
-                        } else {
-                            if own == 2 && empty == 3 {
-                                direction_two = direction_two + 1;
-                            }
-                        }
-                    }
+                if own > best_own {
+                    best_own = own;
+                }
+                if own == 4 {
+                    four_windows = four_windows + 1;
                 }
             }
             start = start + 1;
         }
-        if direction_four > 0 {
-            fours = fours + direction_four;
-        }
-        if direction_three > 0 {
-            threes = threes + 1;
-        }
-        if direction_two > 0 {
-            twos = twos + 1;
+
+        if four_windows > 0 {
+            fours = fours + 1;
+        } else {
+            if best_own == 3 {
+                threes = threes + 1;
+            } else {
+                if best_own == 2 {
+                    twos = twos + 1;
+                }
+            }
         }
         direction = direction + 1;
     }
 
-    let mut score = fours * 22000 + threes * 1800 + twos * 120;
-    if five > 0 {
+    let mut score = fours * 32000 + threes * 2600 + twos * 160;
+    if five {
         score = 10000000;
     } else {
         if fours >= 2 {
-            score = score + 1000000;
+            score = score + 900000;
         }
         if fours >= 1 && threes >= 1 {
-            score = score + 500000;
+            score = score + 420000;
         }
         if threes >= 2 {
-            score = score + 90000;
+            score = score + 120000;
         }
     }
     score
 }
 
-fn strongest_reply(player: int, size: int) -> int {
-    let mut best = 0;
-    let mut y = 0;
-    while y < size {
-        let mut x = 0;
-        while x < size {
-            if bevy::Gomoku::cell(x, y) == 0 && has_neighbor(x, y, size) {
-                bevy::Gomoku::set_cell(x, y, player);
-                let score = threat_score(x, y, player);
-                bevy::Gomoku::set_cell(x, y, 0);
-                if score > best {
-                    best = score;
-                }
-            }
-            x = x + 1;
-        }
-        y = y + 1;
-    }
-    best
-}
-
-let size: int = bevy::Gomoku::board_size();
 let opponent: int = if ai_player == 1 => { 2 } else => { 1 };
-let center: int = size / 2;
-let mut best_x: int = -1;
-let mut best_y: int = -1;
-let mut best_score: int = -2000000000;
-let mut top_x: [int] = [-1, -1, -1, -1, -1, -1];
-let mut top_y: [int] = [-1, -1, -1, -1, -1, -1];
-let mut top_score: [int] = [-2000000000, -2000000000, -2000000000, -2000000000, -2000000000, -2000000000];
-let mut stones: int = 0;
-let mut count_y: int = 0;
-while count_y < size {
-    let mut count_x = 0;
-    while count_x < size {
-        if bevy::Gomoku::cell(count_x, count_y) != 0 {
+let center = 7;
+let mut best_x = -1;
+let mut best_y = -1;
+let mut best_score = -2000000000;
+let mut stones = 0;
+
+let mut own_win_x = -1;
+let mut own_win_y = -1;
+let mut own_win_distance = 1000;
+let mut enemy_win_x = -1;
+let mut enemy_win_y = -1;
+let mut enemy_win_distance = 1000;
+let mut enemy_wins = 0;
+let mut scan_y = 0;
+while scan_y < 15 {
+    let mut scan_x = 0;
+    while scan_x < 15 {
+        if (&board)[scan_y * 15 + scan_x] != 0 {
             stones = stones + 1;
+        } else {
+            if has_neighbor(&board, scan_x, scan_y) {
+                let distance = abs_int(scan_x - center) + abs_int(scan_y - center);
+                board[scan_y * 15 + scan_x] = ai_player;
+                if is_five(&board, scan_x, scan_y, ai_player) && distance < own_win_distance {
+                    own_win_x = scan_x;
+                    own_win_y = scan_y;
+                    own_win_distance = distance;
+                }
+                board[scan_y * 15 + scan_x] = opponent;
+                if is_five(&board, scan_x, scan_y, opponent) {
+                    enemy_wins = enemy_wins + 1;
+                    if distance < enemy_win_distance {
+                        enemy_win_x = scan_x;
+                        enemy_win_y = scan_y;
+                        enemy_win_distance = distance;
+                    }
+                }
+                board[scan_y * 15 + scan_x] = 0;
+            }
         }
-        count_x = count_x + 1;
+        scan_x = scan_x + 1;
     }
-    count_y = count_y + 1;
+    scan_y = scan_y + 1;
 }
 
 if stones == 0 {
     best_x = center;
     best_y = center;
 } else {
-    let mut y = 0;
-    while y < size {
-        let mut x = 0;
-        while x < size {
-            if bevy::Gomoku::cell(x, y) == 0 && has_neighbor(x, y, size) {
-                bevy::Gomoku::set_cell(x, y, ai_player);
-                let attack = threat_score(x, y, ai_player);
-                bevy::Gomoku::set_cell(x, y, 0);
+    if own_win_x >= 0 {
+        best_x = own_win_x;
+        best_y = own_win_y;
+    } else {
+        if enemy_wins > 0 {
+            best_x = enemy_win_x;
+            best_y = enemy_win_y;
+        } else {
+            let mut top_x: [int] = [-1, -1, -1, -1, -1, -1, -1, -1];
+            let mut top_y: [int] = [-1, -1, -1, -1, -1, -1, -1, -1];
+            let mut top_score: [int] = [
+                -2000000000, -2000000000, -2000000000, -2000000000,
+                -2000000000, -2000000000, -2000000000, -2000000000
+            ];
+            let mut top_own_wins: [int] = [0, 0, 0, 0, 0, 0, 0, 0];
+            let mut y = 0;
+            while y < 15 {
+                let mut x = 0;
+                while x < 15 {
+                    if (&board)[y * 15 + x] == 0 && has_close_neighbor(&board, x, y) {
+                        board[y * 15 + x] = ai_player;
+                        let attack = threat_score(&board, x, y, ai_player);
+                        let own_wins = if attack >= 32000 => {
+                            winning_extensions(&board, x, y, ai_player, 2)
+                        } else => { 0 };
+                        board[y * 15 + x] = opponent;
+                        let defense = threat_score(&board, x, y, opponent);
+                        let enemy_extensions = if defense >= 32000 => {
+                            winning_extensions(&board, x, y, opponent, 2)
+                        } else => { 0 };
+                        board[y * 15 + x] = 0;
 
-                bevy::Gomoku::set_cell(x, y, opponent);
-                let defense = threat_score(x, y, opponent);
-                bevy::Gomoku::set_cell(x, y, 0);
+                        let distance = abs_int(x - center) + abs_int(y - center);
+                        let mut order = attack * 2 + defense * 2 - distance;
+                        if own_wins >= 2 {
+                            order = 1500000000 + attack - distance;
+                        } else {
+                            if enemy_extensions >= 2 {
+                                order = 1200000000 + defense - distance;
+                            } else {
+                                if defense >= 120000 {
+                                    order = 1200000000 + defense - distance;
+                                } else {
+                                    if own_wins == 1 {
+                                        order = order + 18000000;
+                                    }
+                                    if enemy_extensions == 1 {
+                                        order = order + 12000000;
+                                    }
+                                }
+                            }
+                        }
 
-                let distance = abs_int(x - center) + abs_int(y - center);
-                let mut score = attack * 2 + defense * 3 - distance;
-                if attack >= 10000000 {
-                    score = 1900000000 - distance;
-                } else {
-                    if defense >= 10000000 {
-                        score = 1800000000 - distance;
+                        let mut insert = 0;
+                        while insert < 8 && order <= (&top_score)[insert] {
+                            insert = insert + 1;
+                        }
+                        if insert < 8 {
+                            let mut shift = 7;
+                            while shift > insert {
+                                top_x[shift] = (&top_x)[shift - 1];
+                                top_y[shift] = (&top_y)[shift - 1];
+                                top_score[shift] = (&top_score)[shift - 1];
+                                top_own_wins[shift] = (&top_own_wins)[shift - 1];
+                                shift = shift - 1;
+                            }
+                            top_x[insert] = x;
+                            top_y[insert] = y;
+                            top_score[insert] = order;
+                            top_own_wins[insert] = own_wins;
+                        }
                     }
+                    x = x + 1;
                 }
-
-                let mut insert = 0;
-                while insert < 6 && score <= top_score[insert].copy() {
-                    insert = insert + 1;
-                }
-                if insert < 6 {
-                    let mut shift = 5;
-                    while shift > insert {
-                        top_score[shift] = top_score[shift - 1].copy();
-                        top_x[shift] = top_x[shift - 1].copy();
-                        top_y[shift] = top_y[shift - 1].copy();
-                        shift = shift - 1;
-                    }
-                    top_score[insert] = score;
-                    top_x[insert] = x;
-                    top_y[insert] = y;
-                }
+                y = y + 1;
             }
-            x = x + 1;
-        }
-        y = y + 1;
-    }
 
-    let mut candidate = 0;
-    while candidate < 6 && top_x[candidate].copy() >= 0 {
-        let x = top_x[candidate].copy();
-        let y = top_y[candidate].copy();
-        bevy::Gomoku::set_cell(x, y, ai_player);
-        let attack = threat_score(x, y, ai_player);
-        let enemy_after = if attack >= 10000000 => { 0 } else => {
-            strongest_reply(opponent, size)
-        };
-        bevy::Gomoku::set_cell(x, y, 0);
-        let searched = top_score[candidate].copy() - enemy_after * 2;
-        if searched > best_score {
-            best_score = searched;
-            best_x = x;
-            best_y = y;
+            if (&top_score)[0] >= 1200000000 {
+                best_x = (&top_x)[0];
+                best_y = (&top_y)[0];
+            } else {
+            let mut root = 0;
+            while root < 8 && (&top_x)[root] >= 0 {
+                let root_x = (&top_x)[root];
+                let root_y = (&top_y)[root];
+                let root_order = (&top_score)[root];
+                let root_wins = (&top_own_wins)[root];
+                let mut searched = root_order;
+
+                if root_wins < 2 {
+                    board[root_y * 15 + root_x] = ai_player;
+                    let mut reply_x: [int] = [-1, -1, -1, -1, -1, -1, -1, -1];
+                    let mut reply_y: [int] = [-1, -1, -1, -1, -1, -1, -1, -1];
+                    let mut reply_score: [int] = [
+                        -2000000000, -2000000000, -2000000000, -2000000000,
+                        -2000000000, -2000000000, -2000000000, -2000000000
+                    ];
+                    let mut reply_attack: [int] = [0, 0, 0, 0, 0, 0, 0, 0];
+                    let mut reply_extensions: [int] = [0, 0, 0, 0, 0, 0, 0, 0];
+                    let mut reply_won: [int] = [0, 0, 0, 0, 0, 0, 0, 0];
+                    let mut reply_y_scan = 0;
+                    while reply_y_scan < 15 {
+                        let mut reply_x_scan = 0;
+                        while reply_x_scan < 15 {
+                            if (&board)[reply_y_scan * 15 + reply_x_scan] == 0 &&
+                                has_close_neighbor(&board, reply_x_scan, reply_y_scan) {
+                                board[reply_y_scan * 15 + reply_x_scan] = opponent;
+                                let attack = threat_score(&board, reply_x_scan, reply_y_scan, opponent);
+                                let extensions = if attack >= 32000 => {
+                                    winning_extensions(
+                                        &board,
+                                        reply_x_scan,
+                                        reply_y_scan,
+                                        opponent,
+                                        2
+                                    )
+                                } else => { 0 };
+                                let won = if is_five(&board, reply_x_scan, reply_y_scan, opponent) => {
+                                    1
+                                } else => { 0 };
+                                let mut block = 0;
+                                if root_wins == 1 {
+                                    board[reply_y_scan * 15 + reply_x_scan] = ai_player;
+                                    block = threat_score(&board, reply_x_scan, reply_y_scan, ai_player);
+                                }
+                                board[reply_y_scan * 15 + reply_x_scan] = 0;
+
+                                let mut order = attack * 3 + block * 4;
+                                if extensions >= 2 {
+                                    order = 1500000000 + attack;
+                                }
+                                if won == 1 {
+                                    order = 1900000000;
+                                }
+                                let mut insert = 0;
+                                while insert < 8 && order <= (&reply_score)[insert] {
+                                    insert = insert + 1;
+                                }
+                                if insert < 8 {
+                                    let mut shift = 7;
+                                    while shift > insert {
+                                        reply_x[shift] = (&reply_x)[shift - 1];
+                                        reply_y[shift] = (&reply_y)[shift - 1];
+                                        reply_score[shift] = (&reply_score)[shift - 1];
+                                        reply_attack[shift] = (&reply_attack)[shift - 1];
+                                        reply_extensions[shift] = (&reply_extensions)[shift - 1];
+                                        reply_won[shift] = (&reply_won)[shift - 1];
+                                        shift = shift - 1;
+                                    }
+                                    reply_x[insert] = reply_x_scan;
+                                    reply_y[insert] = reply_y_scan;
+                                    reply_score[insert] = order;
+                                    reply_attack[insert] = attack;
+                                    reply_extensions[insert] = extensions;
+                                    reply_won[insert] = won;
+                                }
+                            }
+                            reply_x_scan = reply_x_scan + 1;
+                        }
+                        reply_y_scan = reply_y_scan + 1;
+                    }
+
+                    let mut worst = 2000000000;
+                    let mut reply = 0;
+                    while reply < 8 && (&reply_x)[reply] >= 0 && worst > best_score {
+                        let x = (&reply_x)[reply];
+                        let y = (&reply_y)[reply];
+                        board[y * 15 + x] = opponent;
+                        let mut value = root_order;
+                        if (&reply_won)[reply] == 1 {
+                            value = -1900000000;
+                        } else {
+                            let remaining_own_wins = if root_wins == 1 => {
+                                winning_extensions(&board, root_x, root_y, ai_player, 1)
+                            } else => { 0 };
+                            if remaining_own_wins > 0 {
+                                value = 900000000 + root_order;
+                            } else {
+                                let enemy_wins_after = (&reply_extensions)[reply];
+                                if enemy_wins_after >= 2 {
+                                    value = -1100000000;
+                                } else {
+                                    value = root_order - (&reply_attack)[reply] * 4;
+                                    if enemy_wins_after == 1 {
+                                        value = value - 9000000;
+                                    }
+                                }
+                            }
+                        }
+                        board[y * 15 + x] = 0;
+                        if value < worst {
+                            worst = value;
+                        }
+                        reply = reply + 1;
+                    }
+                    board[root_y * 15 + root_x] = 0;
+                    if (&reply_x)[0] >= 0 {
+                        searched = worst;
+                    }
+                }
+
+                if searched > best_score {
+                    best_score = searched;
+                    best_x = root_x;
+                    best_y = root_y;
+                }
+                root = root + 1;
+            }
+            }
         }
-        candidate = candidate + 1;
     }
 }
 
-bevy::Gomoku::set_ai_move(best_x, best_y);
+if best_x >= 0 && best_y >= 0 {
+    bevy::Gomoku::set_ai_move(best_x, best_y);
+}
 best_x;

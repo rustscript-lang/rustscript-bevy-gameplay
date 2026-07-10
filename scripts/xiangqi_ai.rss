@@ -1,5 +1,8 @@
 use bevy;
 
+let mut board: [int] = bevy::Xiangqi::board();
+assert(board.length == 90);
+
 fn abs_int(value: int) -> int {
     if value < 0 => { -value } else => { value }
 }
@@ -12,7 +15,7 @@ fn in_palace(side: int, x: int, y: int) -> bool {
     x >= 3 && x <= 5 && if side == 1 => { y >= 7 && y <= 9 } else => { y >= 0 && y <= 2 }
 }
 
-fn count_between(fx: int, fy: int, tx: int, ty: int) -> int {
+fn count_between(board: [int], fx: int, fy: int, tx: int, ty: int) -> int {
     let mut count = 0;
     if fx == tx || fy == ty {
         let step_x = if tx > fx => { 1 } else => { if tx < fx => { -1 } else => { 0 } };
@@ -20,7 +23,7 @@ fn count_between(fx: int, fy: int, tx: int, ty: int) -> int {
         let mut x = fx + step_x;
         let mut y = fy + step_y;
         while x != tx || y != ty {
-            if bevy::Xiangqi::cell(x, y) != 0 {
+            if board[y * 9 + x].copy() != 0 {
                 count = count + 1;
             }
             x = x + step_x;
@@ -30,11 +33,11 @@ fn count_between(fx: int, fy: int, tx: int, ty: int) -> int {
     count
 }
 
-fn pseudo_legal(side: int, fx: int, fy: int, tx: int, ty: int) -> bool {
+fn pseudo_legal(board: [int], side: int, fx: int, fy: int, tx: int, ty: int) -> bool {
     let mut valid = false;
     if in_bounds(fx, fy) && in_bounds(tx, ty) && (fx != tx || fy != ty) {
-        let piece: int = bevy::Xiangqi::cell(fx, fy);
-        let target: int = bevy::Xiangqi::cell(tx, ty);
+        let piece: int = board[fy * 9 + fx].copy();
+        let target: int = board[ty * 9 + tx].copy();
         if piece * side > 0 && target * side <= 0 {
             let kind = abs_int(piece);
             let dx = tx - fx;
@@ -43,7 +46,7 @@ fn pseudo_legal(side: int, fx: int, fy: int, tx: int, ty: int) -> bool {
             let ay = abs_int(dy);
             if kind == 1 {
                 let step = ax + ay == 1 && in_palace(side, tx, ty);
-                let flying = fx == tx && target == -side && count_between(fx, fy, tx, ty) == 0;
+                let flying = fx == tx && target == -side && count_between(&board, fx, fy, tx, ty) == 0;
                 valid = step || flying;
             } else {
                 if kind == 2 {
@@ -52,20 +55,20 @@ fn pseudo_legal(side: int, fx: int, fy: int, tx: int, ty: int) -> bool {
                     if kind == 3 {
                         let own_half = if side == 1 => { ty >= 5 } else => { ty <= 4 };
                         valid = ax == 2 && ay == 2 && own_half &&
-                            bevy::Xiangqi::cell(fx + dx / 2, fy + dy / 2) == 0;
+                            board[(fy + dy / 2) * 9 + fx + dx / 2].copy() == 0;
                     } else {
                         if kind == 4 {
                             let leg_x = if ax == 2 => { fx + dx / 2 } else => { fx };
                             let leg_y = if ay == 2 => { fy + dy / 2 } else => { fy };
                             valid = ((ax == 2 && ay == 1) || (ax == 1 && ay == 2)) &&
-                                bevy::Xiangqi::cell(leg_x, leg_y) == 0;
+                                board[leg_y * 9 + leg_x].copy() == 0;
                         } else {
                             if kind == 5 {
-                                valid = (fx == tx || fy == ty) && count_between(fx, fy, tx, ty) == 0;
+                                valid = (fx == tx || fy == ty) && count_between(&board, fx, fy, tx, ty) == 0;
                             } else {
                                 if kind == 6 {
                                     let line = fx == tx || fy == ty;
-                                    let screens = count_between(fx, fy, tx, ty);
+                                    let screens = count_between(&board, fx, fy, tx, ty);
                                     valid = line && if target == 0 => { screens == 0 } else => { screens == 1 };
                                 } else {
                                     if kind == 7 {
@@ -84,30 +87,26 @@ fn pseudo_legal(side: int, fx: int, fy: int, tx: int, ty: int) -> bool {
     valid
 }
 
-fn find_general(side: int) -> [int] {
-    let mut result: [int] = [-1, -1];
-    let mut y = 0;
-    while y < 10 {
-        let mut x = 0;
-        while x < 9 {
-            if bevy::Xiangqi::cell(x, y) == side {
-                result[0] = x;
-                result[1] = y;
-            }
-            x = x + 1;
+fn find_general_square(board: [int], side: int) -> int {
+    let mut result = -1;
+    let mut square = 0;
+    while result < 0 && square < 90 {
+        if board[square].copy() == side {
+            result = square;
         }
-        y = y + 1;
+        square = square + 1;
     }
     result
 }
 
-fn is_attacked(x: int, y: int, by_side: int) -> bool {
+fn is_attacked(board: [int], x: int, y: int, by_side: int) -> bool {
     let mut attacked = false;
     let mut fy = 0;
     while !attacked && fy < 10 {
         let mut fx = 0;
         while !attacked && fx < 9 {
-            if bevy::Xiangqi::cell(fx, fy) * by_side > 0 && pseudo_legal(by_side, fx, fy, x, y) {
+            if board[fy * 9 + fx].copy() * by_side > 0 &&
+                pseudo_legal(&board, by_side, fx, fy, x, y) {
                 attacked = true;
             }
             fx = fx + 1;
@@ -117,30 +116,37 @@ fn is_attacked(x: int, y: int, by_side: int) -> bool {
     attacked
 }
 
-fn legal_after_trial(side: int, fx: int, fy: int, tx: int, ty: int) -> bool {
-    let mut legal = pseudo_legal(side, fx, fy, tx, ty);
+fn legal_after_trial(board: [int], side: int, fx: int, fy: int, tx: int, ty: int) -> bool {
+    let mut legal = pseudo_legal(&board, side, fx, fy, tx, ty);
     if legal {
-        let piece: int = bevy::Xiangqi::cell(fx, fy);
-        let target: int = bevy::Xiangqi::cell(tx, ty);
-        bevy::Xiangqi::set_cell(fx, fy, 0);
-        bevy::Xiangqi::set_cell(tx, ty, piece);
-        let general = find_general(side);
-        let gx = general[0].copy();
-        let gy = general[1].copy();
-        legal = gx >= 0 && !is_attacked(gx, gy, -side);
-        bevy::Xiangqi::set_cell(fx, fy, piece);
-        bevy::Xiangqi::set_cell(tx, ty, target);
+        let from_index: int = fy * 9 + fx;
+        let to_index: int = ty * 9 + tx;
+        let piece: int = board[from_index].copy();
+        let target: int = board[to_index].copy();
+        board[from_index] = 0;
+        board[to_index] = piece;
+        let general_square: int = find_general_square(&board, side);
+        legal = general_square >= 0 &&
+            !is_attacked(&board, general_square % 9, general_square / 9, -side);
+        board[from_index] = piece;
+        board[to_index] = target;
     }
     legal
 }
 
+fn side_in_check(board: [int], side: int) -> bool {
+    let general_square: int = find_general_square(&board, side);
+    general_square < 0 ||
+        is_attacked(&board, general_square % 9, general_square / 9, -side)
+}
+
 fn base_value(kind: int) -> int {
-    if kind == 1 => { 600000 } else => {
-        if kind == 5 => { 9000 } else => {
-            if kind == 6 => { 4500 } else => {
-                if kind == 4 => { 4000 } else => {
-                    if kind == 2 || kind == 3 => { 2000 } else => {
-                        if kind == 7 => { 1000 } else => { 0 }
+    if kind == 1 => { 1000000 } else => {
+        if kind == 5 => { 10000 } else => {
+            if kind == 6 => { 5000 } else => {
+                if kind == 4 => { 4500 } else => {
+                    if kind == 2 || kind == 3 => { 2200 } else => {
+                        if kind == 7 => { 1200 } else => { 0 }
                     }
                 }
             }
@@ -148,7 +154,8 @@ fn base_value(kind: int) -> int {
     }
 }
 
-// Lightweight XQWLight-style material and piece-square evaluation.
+// Compact piece-square terms following the priorities used by XQWLight:
+// active chariots/cannons/horses, advanced soldiers, and a guarded palace.
 fn piece_value(piece: int, x: int, y: int) -> int {
     let side = if piece > 0 => { 1 } else => { -1 };
     let kind = abs_int(piece);
@@ -156,20 +163,29 @@ fn piece_value(piece: int, x: int, y: int) -> int {
     let advance = if side == 1 => { 9 - y } else => { y };
     let mut value = base_value(kind);
     if kind == 7 {
-        value = value + advance * 70 + center * 25;
+        value = value + advance * 85 + center * 30;
         let crossed = if side == 1 => { y <= 4 } else => { y >= 5 };
         if crossed {
-            value = value + 350;
+            value = value + 500;
         }
     } else {
         if kind == 4 {
-            value = value + center * 55 + (4 - abs_int(y - 4)) * 20;
+            let river_center = 5 - abs_int(y - 4);
+            value = value + center * 70 + river_center * 24;
         } else {
-            if kind == 5 || kind == 6 {
-                value = value + center * 25 + advance * 8;
+            if kind == 5 {
+                value = value + center * 36 + advance * 10;
             } else {
-                if kind == 2 || kind == 3 {
-                    value = value + 80;
+                if kind == 6 {
+                    value = value + center * 42 + advance * 14;
+                } else {
+                    if kind == 2 || kind == 3 {
+                        value = value + 120;
+                    } else {
+                        if kind == 1 && x == 4 {
+                            value = value + 100;
+                        }
+                    }
                 }
             }
         }
@@ -177,13 +193,13 @@ fn piece_value(piece: int, x: int, y: int) -> int {
     value
 }
 
-fn evaluate(side: int) -> int {
+fn evaluate(board: [int], side: int) -> int {
     let mut score = 0;
     let mut y = 0;
     while y < 10 {
         let mut x = 0;
         while x < 9 {
-            let piece: int = bevy::Xiangqi::cell(x, y);
+            let piece: int = board[y * 9 + x].copy();
             if piece != 0 {
                 let value = piece_value(piece, x, y);
                 if piece * side > 0 {
@@ -199,29 +215,19 @@ fn evaluate(side: int) -> int {
     score
 }
 
-// Extends a leaf through the best legal capture to reduce horizon errors.
-fn capture_extension(side: int, stand_pat: int) -> int {
-    let mut best = stand_pat;
+fn has_legal_move(board: [int], side: int) -> bool {
+    let mut found = false;
     let mut fy = 0;
-    while fy < 10 {
+    while !found && fy < 10 {
         let mut fx = 0;
-        while fx < 9 {
-            if bevy::Xiangqi::cell(fx, fy) * side > 0 {
+        while !found && fx < 9 {
+            if board[fy * 9 + fx].copy() * side > 0 {
                 let mut ty = 0;
-                while ty < 10 {
+                while !found && ty < 10 {
                     let mut tx = 0;
-                    while tx < 9 {
-                        let target: int = bevy::Xiangqi::cell(tx, ty);
-                        if target * side < 0 && legal_after_trial(side, fx, fy, tx, ty) {
-                            let piece: int = bevy::Xiangqi::cell(fx, fy);
-                            bevy::Xiangqi::set_cell(fx, fy, 0);
-                            bevy::Xiangqi::set_cell(tx, ty, piece);
-                            let score = if target == -side => { 900000000 } else => { evaluate(side) };
-                            bevy::Xiangqi::set_cell(fx, fy, piece);
-                            bevy::Xiangqi::set_cell(tx, ty, target);
-                            if score > best {
-                                best = score;
-                            }
+                    while !found && tx < 9 {
+                        if legal_after_trial(&board, side, fx, fy, tx, ty) {
+                            found = true;
                         }
                         tx = tx + 1;
                     }
@@ -232,51 +238,157 @@ fn capture_extension(side: int, stand_pat: int) -> int {
         }
         fy = fy + 1;
     }
+    found
+}
+
+// Evaluate one tactical continuation and its immediate legal recaptures.
+fn capture_with_recapture(board: [int], side: int, fx: int, fy: int, tx: int, ty: int) -> int {
+    let from_index: int = fy * 9 + fx;
+    let to_index: int = ty * 9 + tx;
+    let piece: int = board[from_index].copy();
+    let target: int = board[to_index].copy();
+    board[from_index] = 0;
+    board[to_index] = piece;
+
+    let mut score = if target == -side => { 900000000 } else => { evaluate(&board, side) };
+    if target != -side {
+        let opponent = -side;
+        let mut rfy = 0;
+        while rfy < 10 {
+            let mut rfx = 0;
+            while rfx < 9 {
+                let reply_index: int = rfy * 9 + rfx;
+                if board[reply_index].copy() * opponent > 0 &&
+                    legal_after_trial(&board, opponent, rfx, rfy, tx, ty) {
+                    let reply_piece: int = board[reply_index].copy();
+                    board[reply_index] = 0;
+                    board[to_index] = reply_piece;
+                    let reply_score = evaluate(&board, side);
+                    board[reply_index] = reply_piece;
+                    board[to_index] = piece;
+                    if reply_score < score {
+                        score = reply_score;
+                    }
+                }
+                rfx = rfx + 1;
+            }
+            rfy = rfy + 1;
+        }
+    }
+
+    board[from_index] = piece;
+    board[to_index] = target;
+    score
+}
+
+// XQWLight-style quiescence: check evasions are mandatory; otherwise only
+// legal captures extend the leaf. Immediate recaptures reduce horizon errors.
+fn tactical_extension(board: [int], side: int) -> int {
+    let stand_pat = evaluate(&board, side);
+    let mut best = -850000000;
+    if has_legal_move(&board, side) {
+        let check_flag: int = if side_in_check(&board, side) => { 1 } else => { 0 };
+        if check_flag == 0 {
+            best = stand_pat;
+        }
+        let mut fy = 0;
+        while fy < 10 {
+            let mut fx = 0;
+            while fx < 9 {
+                if board[fy * 9 + fx].copy() * side > 0 {
+                    let mut ty = 0;
+                    while ty < 10 {
+                        let mut tx = 0;
+                        while tx < 9 {
+                            let target: int = board[ty * 9 + tx].copy();
+                            if (check_flag == 1 || target * side < 0) &&
+                                legal_after_trial(&board, side, fx, fy, tx, ty) {
+                                let score = if target * side < 0 => {
+                                    capture_with_recapture(&board, side, fx, fy, tx, ty)
+                                } else => {
+                                    let from_index: int = fy * 9 + fx;
+                                    let to_index: int = ty * 9 + tx;
+                                    let piece: int = board[from_index].copy();
+                                    board[from_index] = 0;
+                                    board[to_index] = piece;
+                                    let quiet_score = evaluate(&board, side);
+                                    board[from_index] = piece;
+                                    board[to_index] = 0;
+                                    quiet_score
+                                };
+                                if score > best {
+                                    best = score;
+                                }
+                            }
+                            tx = tx + 1;
+                        }
+                        ty = ty + 1;
+                    }
+                }
+                fx = fx + 1;
+            }
+            fy = fy + 1;
+        }
+    }
     best
 }
 
-let opponent: int = -ai_player;
-let mut top_fx: [int] = [-1, -1, -1, -1, -1, -1];
-let mut top_fy: [int] = [-1, -1, -1, -1, -1, -1];
-let mut top_tx: [int] = [-1, -1, -1, -1, -1, -1];
-let mut top_ty: [int] = [-1, -1, -1, -1, -1, -1];
-let mut top_score: [int] = [-2000000000, -2000000000, -2000000000, -2000000000, -2000000000, -2000000000];
+fn move_order_score(board: [int], side: int, fx: int, fy: int, tx: int, ty: int) -> int {
+    let piece: int = board[fy * 9 + fx].copy();
+    let target: int = board[ty * 9 + tx].copy();
+    let kind = abs_int(piece);
+    let mut score = piece_value(piece, tx, ty) - piece_value(piece, fx, fy);
+    if target != 0 {
+        score = score + base_value(abs_int(target)) * 12 - base_value(kind) / 5;
+    }
+    if target == -side {
+        score = 1900000000;
+    }
+    score
+}
 
-// Move ordering: legal generation, captures, checks, then positional value.
+let opponent: int = -ai_player;
+let opponent_general_square: int = find_general_square(&board, opponent);
+let opponent_general_x: int = opponent_general_square % 9;
+let opponent_general_y: int = opponent_general_square / 9;
+let mut top_fx: [int] = [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1];
+let mut top_fy: [int] = [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1];
+let mut top_tx: [int] = [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1];
+let mut top_ty: [int] = [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1];
+let mut top_score: [int] = [-2000000000, -2000000000, -2000000000, -2000000000, -2000000000, -2000000000, -2000000000, -2000000000, -2000000000, -2000000000];
+
+// Generate every legal root move. Captures, checks, escapes, and positional
+// gains compete for ten principal-variation slots.
 let mut fy = 0;
 while fy < 10 {
     let mut fx = 0;
     while fx < 9 {
-        if bevy::Xiangqi::cell(fx, fy) * ai_player > 0 {
+        if (&board)[fy * 9 + fx] * ai_player > 0 {
             let mut ty = 0;
             while ty < 10 {
                 let mut tx = 0;
                 while tx < 9 {
-                    if legal_after_trial(ai_player, fx, fy, tx, ty) {
-                        let piece: int = bevy::Xiangqi::cell(fx, fy);
-                        let target: int = bevy::Xiangqi::cell(tx, ty);
-                        bevy::Xiangqi::set_cell(fx, fy, 0);
-                        bevy::Xiangqi::set_cell(tx, ty, piece);
-                        let mut score = evaluate(ai_player) + base_value(abs_int(target)) * 2;
-                        if target == opponent {
-                            score = 1900000000;
-                        } else {
-                            let enemy_general = find_general(opponent);
-                            let ex = enemy_general[0].copy();
-                            let ey = enemy_general[1].copy();
-                            if ex >= 0 && is_attacked(ex, ey, ai_player) {
-                                score = score + 700;
-                            }
+                    if legal_after_trial(&board, ai_player, fx, fy, tx, ty) {
+                        let from_index: int = fy * 9 + fx;
+                        let to_index: int = ty * 9 + tx;
+                        let piece: int = (&board)[from_index];
+                        let target: int = (&board)[to_index];
+                        let mut score = move_order_score(&board, ai_player, fx, fy, tx, ty);
+                        board[from_index] = 0;
+                        board[to_index] = piece;
+                        if opponent_general_x >= 0 &&
+                            pseudo_legal(&board, ai_player, tx, ty, opponent_general_x, opponent_general_y) {
+                            score = score + 50000;
                         }
-                        bevy::Xiangqi::set_cell(fx, fy, piece);
-                        bevy::Xiangqi::set_cell(tx, ty, target);
+                        board[from_index] = piece;
+                        board[to_index] = target;
 
                         let mut insert = 0;
-                        while insert < 6 && score <= top_score[insert].copy() {
+                        while insert < 10 && score <= top_score[insert].copy() {
                             insert = insert + 1;
                         }
-                        if insert < 6 {
-                            let mut shift = 5;
+                        if insert < 10 {
+                            let mut shift = 9;
                             while shift > insert {
                                 top_score[shift] = top_score[shift - 1].copy();
                                 top_fx[shift] = top_fx[shift - 1].copy();
@@ -308,15 +420,17 @@ let mut best_tx = -1;
 let mut best_ty = -1;
 let mut best_score = -2000000000;
 let mut candidate = 0;
-while candidate < 6 && top_fx[candidate].copy() >= 0 {
+while candidate < 10 && top_fx[candidate].copy() >= 0 && best_score < 800000000 {
     let fx = top_fx[candidate].copy();
     let fy = top_fy[candidate].copy();
     let tx = top_tx[candidate].copy();
     let ty = top_ty[candidate].copy();
-    let piece: int = bevy::Xiangqi::cell(fx, fy);
-    let target: int = bevy::Xiangqi::cell(tx, ty);
-    bevy::Xiangqi::set_cell(fx, fy, 0);
-    bevy::Xiangqi::set_cell(tx, ty, piece);
+    let from_index: int = fy * 9 + fx;
+    let to_index: int = ty * 9 + tx;
+    let piece: int = (&board)[from_index];
+    let target: int = (&board)[to_index];
+    board[from_index] = 0;
+    board[to_index] = piece;
 
     let mut searched = 900000000;
     if target != opponent {
@@ -326,25 +440,35 @@ while candidate < 6 && top_fx[candidate].copy() >= 0 {
         while !cutoff && rfy < 10 {
             let mut rfx = 0;
             while !cutoff && rfx < 9 {
-                if bevy::Xiangqi::cell(rfx, rfy) * opponent > 0 {
+                if (&board)[rfy * 9 + rfx] * opponent > 0 {
                     let mut rty = 0;
                     while !cutoff && rty < 10 {
                         let mut rtx = 0;
                         while !cutoff && rtx < 9 {
-                            if legal_after_trial(opponent, rfx, rfy, rtx, rty) {
+                            if legal_after_trial(&board, opponent, rfx, rfy, rtx, rty) {
                                 reply_found = true;
-                                let reply_piece: int = bevy::Xiangqi::cell(rfx, rfy);
-                                let reply_target: int = bevy::Xiangqi::cell(rtx, rty);
-                                bevy::Xiangqi::set_cell(rfx, rfy, 0);
-                                bevy::Xiangqi::set_cell(rtx, rty, reply_piece);
+                                let reply_from_index: int = rfy * 9 + rfx;
+                                let reply_to_index: int = rty * 9 + rtx;
+                                let reply_piece: int = (&board)[reply_from_index];
+                                let reply_target: int = (&board)[reply_to_index];
+                                board[reply_from_index] = 0;
+                                board[reply_to_index] = reply_piece;
                                 let reply_score = if reply_target == ai_player => {
                                     -900000000
                                 } else => {
-                                    let stand_pat = evaluate(ai_player);
-                                    capture_extension(ai_player, stand_pat)
+                                    let checked: bool = side_in_check(&board, ai_player);
+                                    if reply_target != 0 || checked => {
+                                        tactical_extension(&board, ai_player)
+                                    } else => {
+                                        if !has_legal_move(&board, ai_player) => {
+                                            -850000000
+                                        } else => {
+                                            evaluate(&board, ai_player)
+                                        }
+                                    }
                                 };
-                                bevy::Xiangqi::set_cell(rfx, rfy, reply_piece);
-                                bevy::Xiangqi::set_cell(rtx, rty, reply_target);
+                                board[reply_from_index] = reply_piece;
+                                board[reply_to_index] = reply_target;
                                 if reply_score < searched {
                                     searched = reply_score;
                                 }
@@ -366,9 +490,9 @@ while candidate < 6 && top_fx[candidate].copy() >= 0 {
         }
     }
 
-    bevy::Xiangqi::set_cell(fx, fy, piece);
-    bevy::Xiangqi::set_cell(tx, ty, target);
-    let final_score = searched + top_score[candidate].copy() / 100;
+    board[from_index] = piece;
+    board[to_index] = target;
+    let final_score = searched + top_score[candidate].copy() / 10000;
     if final_score > best_score {
         best_score = final_score;
         best_fx = fx;
@@ -379,5 +503,7 @@ while candidate < 6 && top_fx[candidate].copy() >= 0 {
     candidate = candidate + 1;
 }
 
-bevy::Xiangqi::set_ai_move(best_fx, best_fy, best_tx, best_ty);
+if best_fx >= 0 && best_fy >= 0 && best_tx >= 0 && best_ty >= 0 {
+    bevy::Xiangqi::set_ai_move(best_fx, best_fy, best_tx, best_ty);
+}
 best_score;

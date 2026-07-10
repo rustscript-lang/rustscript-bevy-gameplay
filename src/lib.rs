@@ -984,7 +984,7 @@ fn run_value(source: &str) -> Result<Value, String> {
 fn run_gomoku_script(source: &str) -> Result<(Value, GomokuScriptTelemetry), String> {
     let started = Instant::now();
     let compiled = compile_source(source).map_err(|err| err.to_string())?;
-    let mut vm = Vm::new_with_jit_config(compiled.program, shooter_jit_config());
+    let mut vm = Vm::new_with_jit_config(compiled.program, gomoku_jit_config());
     bind_gomoku_hosts(&mut vm);
     let status = vm.run().map_err(|err| err.to_string())?;
     if status != VmStatus::Halted {
@@ -1042,7 +1042,7 @@ fn run_xiangqi_script(
     let started = Instant::now();
     let compiled = compile_source(source).map_err(|err| err.to_string())?;
     let mut vm = if enable_jit {
-        Vm::new_with_jit_config(compiled.program, shooter_jit_config())
+        Vm::new_with_jit_config(compiled.program, xiangqi_jit_config())
     } else {
         Vm::new(compiled.program)
     };
@@ -1101,6 +1101,22 @@ fn shooter_jit_config() -> JitConfig {
         enabled: true,
         hot_loop_threshold: 1,
         max_trace_len: 512,
+    }
+}
+
+fn gomoku_jit_config() -> JitConfig {
+    JitConfig {
+        enabled: true,
+        hot_loop_threshold: 8,
+        max_trace_len: 2_048,
+    }
+}
+
+fn xiangqi_jit_config() -> JitConfig {
+    JitConfig {
+        enabled: true,
+        hot_loop_threshold: 32,
+        max_trace_len: 2_048,
     }
 }
 
@@ -1173,6 +1189,7 @@ fn bind_shooter_hosts(vm: &mut Vm) {
 }
 
 fn bind_gomoku_hosts(vm: &mut Vm) {
+    vm.bind_static_args_function("bevy::Gomoku::board", host::bevy::gomoku_board_host);
     vm.bind_static_args_function(
         "bevy::Gomoku::board_size",
         host::bevy::gomoku_board_size_host,
@@ -1190,6 +1207,7 @@ fn bind_gomoku_hosts(vm: &mut Vm) {
 }
 
 fn bind_xiangqi_hosts(vm: &mut Vm) {
+    vm.bind_static_args_function("bevy::Xiangqi::board", host::bevy::xiangqi_board_host);
     vm.bind_static_args_function(
         "bevy::Xiangqi::board_width",
         host::bevy::xiangqi_board_width_host,
@@ -1553,6 +1571,27 @@ mod host {
             return_one(gomoku_board_size(args))
         }
 
+        pub(crate) fn gomoku_board_host(args: &[Value]) -> VmResult<CallOutcome> {
+            if !args.is_empty() {
+                return Err(VmError::HostError(
+                    "bevy::Gomoku::board expects no arguments".to_string(),
+                ));
+            }
+            let board = with_gomoku_world(|world| {
+                ensure_gomoku_resources(world);
+                Ok(Value::array(
+                    world
+                        .resource::<GomokuBoard>()
+                        .cells()
+                        .iter()
+                        .copied()
+                        .map(Value::Int)
+                        .collect(),
+                ))
+            })?;
+            Ok(CallOutcome::Return(CallReturn::one(board)))
+        }
+
         /// Reads a board cell; out-of-bounds cells return a sentinel value.
         #[pd_host_function(name = "bevy::Gomoku::cell")]
         pub(crate) fn gomoku_cell_impl(x: i64, y: i64) -> VmResult<i64> {
@@ -1635,6 +1674,27 @@ mod host {
 
         pub(crate) fn xiangqi_board_height_host(args: &[Value]) -> VmResult<CallOutcome> {
             return_one(xiangqi_board_height(args))
+        }
+
+        pub(crate) fn xiangqi_board_host(args: &[Value]) -> VmResult<CallOutcome> {
+            if !args.is_empty() {
+                return Err(VmError::HostError(
+                    "bevy::Xiangqi::board expects no arguments".to_string(),
+                ));
+            }
+            let board = with_xiangqi_world(|world| {
+                ensure_xiangqi_resources(world);
+                Ok(Value::array(
+                    world
+                        .resource::<XiangqiBoard>()
+                        .cells()
+                        .iter()
+                        .copied()
+                        .map(Value::Int)
+                        .collect(),
+                ))
+            })?;
+            Ok(CallOutcome::Return(CallReturn::one(board)))
         }
 
         /// Reads a Xiangqi cell; out-of-bounds cells return a sentinel value.

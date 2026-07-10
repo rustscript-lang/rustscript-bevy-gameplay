@@ -19,6 +19,7 @@ fn run_script_smoke_from_empty_cwd(example: &str) -> Output {
         .args([
             "run",
             "--quiet",
+            "--release",
             "--manifest-path",
             manifest.to_str().expect("manifest path should be UTF-8"),
             "--example",
