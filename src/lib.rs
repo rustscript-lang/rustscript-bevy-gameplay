@@ -1,4 +1,4 @@
-use std::{cell::RefCell, time::Instant};
+use std::{cell::RefCell, collections::HashMap, time::Instant};
 
 use bevy_ecs::prelude::*;
 pub(crate) use vm::Vm;
@@ -124,6 +124,7 @@ pub struct ShooterRuleTickSummary {
 }
 
 pub const GOMOKU_BOARD_SIZE: i64 = 15;
+const AI_VM_CACHE_LIMIT: usize = 16;
 
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
 pub struct GomokuBoard {
@@ -406,7 +407,7 @@ pub fn choose_gomoku_ai_move(
     ensure_gomoku_resources(world);
     world.insert_resource(GomokuScriptState::default());
     let wrapped = format!("let ai_player: int = {ai_player};\n{source}");
-    let (_value, telemetry) = with_gomoku_context(world, || run_gomoku_script(&wrapped))?;
+    let (_value, telemetry) = with_gomoku_context(world, || run_cached_gomoku_ai_script(&wrapped))?;
     let state = *world
         .get_resource::<GomokuScriptState>()
         .ok_or_else(|| "gomoku script did not publish an AI move".to_string())?;
@@ -506,7 +507,8 @@ pub fn choose_xiangqi_ai_move(
     ensure_xiangqi_resources(world);
     world.insert_resource(XiangqiScriptState::default());
     let wrapped = format!("let ai_player: int = {ai_player};\n{source}");
-    let (_value, telemetry) = with_xiangqi_context(world, || run_xiangqi_script(&wrapped, true))?;
+    let (_value, telemetry) =
+        with_xiangqi_context(world, || run_cached_xiangqi_ai_script(&wrapped))?;
     let state = *world
         .get_resource::<XiangqiScriptState>()
         .ok_or_else(|| "xiangqi script did not publish an AI move".to_string())?;
@@ -840,6 +842,8 @@ thread_local! {
     static SHOOTER_CONTEXT: RefCell<Option<ShooterContext>> = const { RefCell::new(None) };
     static GOMOKU_CONTEXT: RefCell<Option<GomokuContext>> = const { RefCell::new(None) };
     static XIANGQI_CONTEXT: RefCell<Option<XiangqiContext>> = const { RefCell::new(None) };
+    static GOMOKU_AI_VM_CACHE: RefCell<HashMap<String, Vm>> = RefCell::new(HashMap::new());
+    static XIANGQI_AI_VM_CACHE: RefCell<HashMap<String, Vm>> = RefCell::new(HashMap::new());
 }
 
 struct BevyContextGuard;
@@ -1006,6 +1010,45 @@ fn run_gomoku_script(source: &str) -> Result<(Value, GomokuScriptTelemetry), Str
     ))
 }
 
+fn run_cached_gomoku_ai_script(source: &str) -> Result<(Value, GomokuScriptTelemetry), String> {
+    GOMOKU_AI_VM_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if !cache.contains_key(source) {
+            if cache.len() >= AI_VM_CACHE_LIMIT {
+                cache.clear();
+            }
+            let compiled = compile_source(source).map_err(|err| err.to_string())?;
+            let mut vm = Vm::new_with_jit_config(compiled.program, gomoku_jit_config());
+            bind_gomoku_hosts(&mut vm);
+            cache.insert(source.to_string(), vm);
+        }
+
+        let vm = cache
+            .get_mut(source)
+            .ok_or_else(|| "gomoku AI VM cache missed after insert".to_string())?;
+        vm.reset_for_reuse();
+        let started = Instant::now();
+        let status = vm.run().map_err(|err| err.to_string())?;
+        if status != VmStatus::Halted {
+            return Err(format!("script did not halt: {status:?}"));
+        }
+        let value = vm
+            .stack()
+            .last()
+            .cloned()
+            .ok_or_else(|| "script returned an empty stack".to_string())?;
+        let jit_snapshot = vm.jit_snapshot();
+        Ok((
+            value,
+            GomokuScriptTelemetry {
+                jit_enabled: jit_snapshot.config.enabled,
+                jit_trace_count: jit_snapshot.traces.len(),
+                elapsed_micros: started.elapsed().as_micros(),
+            },
+        ))
+    })
+}
+
 fn run_gomoku_script_with_debugger(
     source: &str,
     debugger: &mut Debugger,
@@ -1065,6 +1108,45 @@ fn run_xiangqi_script(
             elapsed_micros: started.elapsed().as_micros(),
         },
     ))
+}
+
+fn run_cached_xiangqi_ai_script(source: &str) -> Result<(Value, XiangqiScriptTelemetry), String> {
+    XIANGQI_AI_VM_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if !cache.contains_key(source) {
+            if cache.len() >= AI_VM_CACHE_LIMIT {
+                cache.clear();
+            }
+            let compiled = compile_source(source).map_err(|err| err.to_string())?;
+            let mut vm = Vm::new_with_jit_config(compiled.program, xiangqi_jit_config());
+            bind_xiangqi_hosts(&mut vm);
+            cache.insert(source.to_string(), vm);
+        }
+
+        let vm = cache
+            .get_mut(source)
+            .ok_or_else(|| "xiangqi AI VM cache missed after insert".to_string())?;
+        vm.reset_for_reuse();
+        let started = Instant::now();
+        let status = vm.run().map_err(|err| err.to_string())?;
+        if status != VmStatus::Halted {
+            return Err(format!("script did not halt: {status:?}"));
+        }
+        let value = vm
+            .stack()
+            .last()
+            .cloned()
+            .ok_or_else(|| "script returned an empty stack".to_string())?;
+        let jit_snapshot = vm.jit_snapshot();
+        Ok((
+            value,
+            XiangqiScriptTelemetry {
+                jit_enabled: jit_snapshot.config.enabled,
+                jit_trace_count: jit_snapshot.traces.len(),
+                elapsed_micros: started.elapsed().as_micros(),
+            },
+        ))
+    })
 }
 
 fn run_xiangqi_script_with_debugger(

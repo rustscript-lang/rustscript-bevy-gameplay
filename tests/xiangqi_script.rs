@@ -160,6 +160,50 @@ fn rustscript_ai_captures_general_when_available() {
 }
 
 #[test]
+fn rustscript_ai_reuses_cached_jit_traces_for_same_script() {
+    let script = AI_SCRIPT.replacen("use bevy;", "use bevy;\nlet cache_probe: int = 0;", 1);
+    let mut world = seeded_world(&[
+        (4, 9, RED_GENERAL),
+        (4, 0, BLACK_GENERAL),
+        (4, 4, BLACK_CHARIOT),
+    ]);
+
+    let mut moves = Vec::new();
+    for _ in 0..5 {
+        moves.push(
+            choose_xiangqi_ai_move(&mut world, &script, BLACK)
+                .expect("AI script should choose a move"),
+        );
+    }
+
+    let first = moves.first().expect("AI script should run at least once");
+    let last = moves.last().expect("AI script should run at least once");
+    assert_eq!(
+        (first.from_x, first.from_y, first.to_x, first.to_y),
+        (4, 4, 4, 9)
+    );
+    assert_eq!(
+        (last.from_x, last.from_y, last.to_x, last.to_y),
+        (4, 4, 4, 9)
+    );
+    assert!(last.telemetry.jit_enabled);
+    assert!(
+        last.telemetry.jit_trace_count > 0,
+        "AI search loops should produce cached JIT traces"
+    );
+    assert!(
+        moves
+            .windows(2)
+            .all(|pair| pair[1].telemetry.jit_trace_count >= pair[0].telemetry.jit_trace_count),
+        "cached trace count should never reset for the same script"
+    );
+    assert!(
+        last.telemetry.jit_trace_count > first.telemetry.jit_trace_count,
+        "same cached VM should keep warming new trace roots across repeated runs"
+    );
+}
+
+#[test]
 fn rustscript_ai_uses_general_to_answer_close_threat() {
     let mut world = seeded_world(&[
         (4, 9, RED_GENERAL),

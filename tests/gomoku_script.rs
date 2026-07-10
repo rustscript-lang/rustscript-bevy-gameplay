@@ -66,6 +66,32 @@ fn rustscript_ai_finishes_its_own_open_four() {
 }
 
 #[test]
+fn rustscript_ai_reuses_cached_jit_traces_for_same_script() {
+    let script = AI_SCRIPT.replacen("use bevy;", "use bevy;\nlet cache_probe: int = 0;", 1);
+    let mut world = seeded_world(&[(5, 7, 2), (6, 7, 2), (7, 7, 2), (8, 7, 2)]);
+
+    let first =
+        choose_gomoku_ai_move(&mut world, &script, 2).expect("AI script should choose a move");
+    let second =
+        choose_gomoku_ai_move(&mut world, &script, 2).expect("AI script should choose a move");
+    let third =
+        choose_gomoku_ai_move(&mut world, &script, 2).expect("AI script should choose a move");
+
+    assert_eq!((first.x, first.y), (9, 7));
+    assert_eq!((second.x, second.y), (9, 7));
+    assert_eq!((third.x, third.y), (9, 7));
+    assert!(third.telemetry.jit_enabled);
+    assert!(
+        third.telemetry.jit_trace_count > 0,
+        "AI scan loops should produce cached JIT traces"
+    );
+    assert_eq!(
+        second.telemetry.jit_trace_count, third.telemetry.jit_trace_count,
+        "same script and same board should reuse already compiled traces"
+    );
+}
+
+#[test]
 fn rustscript_ai_blocks_player_open_four() {
     let mut world = seeded_world(&[(5, 7, 1), (6, 7, 1), (7, 7, 1), (8, 7, 1)]);
 
