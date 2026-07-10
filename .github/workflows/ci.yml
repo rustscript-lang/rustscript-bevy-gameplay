@@ -47,7 +47,7 @@ jobs:
         run: cargo clippy --all-targets
       - name: Tests
         working-directory: rustscript-bevy-gameplay
-        run: cargo test --tests --jobs 4
+        run: cargo test --tests
       - name: Example run
         working-directory: rustscript-bevy-gameplay
         run: cargo run --example combat
