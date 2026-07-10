@@ -205,7 +205,7 @@ fn xiangqi_ui(world: &mut World) {
         .remove_resource::<XiangqiScripts>()
         .unwrap_or_default();
     scripts.editor.update_auto_apply(std::time::Instant::now());
-    if let Some(session) = scripts.debug_session.as_ref() {
+    if let Some(session) = scripts.debug_session.as_mut() {
         session.poll(&mut scripts.editor);
     }
     let mut clicked = None;
@@ -677,6 +677,7 @@ fn handle_xiangqi_editor_actions(
 
 fn start_xiangqi_debug_session(world: &mut World, scripts: &mut XiangqiScripts, tab: usize) {
     let source = scripts.editor.active_source(tab).to_string();
+    let source_line_offset = scripts.editor.tabs[tab].lint_prefix.lines().count() as u32;
     let board = world.resource::<XiangqiBoard>().clone();
     let bridge = DebugCommandBridge::new();
     let thread_bridge = bridge.clone();
@@ -704,10 +705,8 @@ fn start_xiangqi_debug_session(world: &mut World, scripts: &mut XiangqiScripts, 
         };
         let _ = sender.send(result.unwrap_or_else(|err| format!("debug error: {err}")));
     });
-    scripts.editor.debug_output.clear();
-    scripts.editor.debug_line = None;
-    scripts.editor.debug_attached = false;
-    scripts.debug_session = Some(DebugSession::new(bridge, receiver));
+    scripts.editor.begin_debug_session();
+    scripts.debug_session = Some(DebugSession::new(bridge, receiver, source_line_offset));
 }
 
 fn publish_move_state(world: &mut World, summary: XiangqiMoveSummary, message: &str) {

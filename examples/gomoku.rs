@@ -195,7 +195,7 @@ fn gomoku_ui(world: &mut World) {
     let mut state = world.resource::<GomokuUiState>().clone();
     let mut scripts = world.remove_resource::<GomokuScripts>().unwrap_or_default();
     scripts.editor.update_auto_apply(std::time::Instant::now());
-    if let Some(session) = scripts.debug_session.as_ref() {
+    if let Some(session) = scripts.debug_session.as_mut() {
         session.poll(&mut scripts.editor);
     }
     let mut clicked_move = None;
@@ -539,6 +539,7 @@ fn handle_gomoku_editor_actions(
 
 fn start_gomoku_debug_session(world: &mut World, scripts: &mut GomokuScripts, tab: usize) {
     let source = scripts.editor.active_source(tab).to_string();
+    let source_line_offset = scripts.editor.tabs[tab].lint_prefix.lines().count() as u32;
     let board = world.resource::<GomokuBoard>().clone();
     let (debug_x, debug_y) = first_open_gomoku_point(&board);
     let bridge = DebugCommandBridge::new();
@@ -570,10 +571,8 @@ fn start_gomoku_debug_session(world: &mut World, scripts: &mut GomokuScripts, ta
         };
         let _ = sender.send(result.unwrap_or_else(|err| format!("debug error: {err}")));
     });
-    scripts.editor.debug_output.clear();
-    scripts.editor.debug_line = None;
-    scripts.editor.debug_attached = false;
-    scripts.debug_session = Some(DebugSession::new(bridge, receiver));
+    scripts.editor.begin_debug_session();
+    scripts.debug_session = Some(DebugSession::new(bridge, receiver, source_line_offset));
 }
 
 fn first_open_gomoku_point(board: &GomokuBoard) -> (i64, i64) {
