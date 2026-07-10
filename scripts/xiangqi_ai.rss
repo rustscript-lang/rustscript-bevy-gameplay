@@ -199,6 +199,42 @@ fn evaluate(side: int) -> int {
     score
 }
 
+// Extends a leaf through the best legal capture to reduce horizon errors.
+fn capture_extension(side: int, stand_pat: int) -> int {
+    let mut best = stand_pat;
+    let mut fy = 0;
+    while fy < 10 {
+        let mut fx = 0;
+        while fx < 9 {
+            if bevy::Xiangqi::cell(fx, fy) * side > 0 {
+                let mut ty = 0;
+                while ty < 10 {
+                    let mut tx = 0;
+                    while tx < 9 {
+                        let target: int = bevy::Xiangqi::cell(tx, ty);
+                        if target * side < 0 && legal_after_trial(side, fx, fy, tx, ty) {
+                            let piece: int = bevy::Xiangqi::cell(fx, fy);
+                            bevy::Xiangqi::set_cell(fx, fy, 0);
+                            bevy::Xiangqi::set_cell(tx, ty, piece);
+                            let score = if target == -side => { 900000000 } else => { evaluate(side) };
+                            bevy::Xiangqi::set_cell(fx, fy, piece);
+                            bevy::Xiangqi::set_cell(tx, ty, target);
+                            if score > best {
+                                best = score;
+                            }
+                        }
+                        tx = tx + 1;
+                    }
+                    ty = ty + 1;
+                }
+            }
+            fx = fx + 1;
+        }
+        fy = fy + 1;
+    }
+    best
+}
+
 let opponent: int = -ai_player;
 let mut top_fx: [int] = [-1, -1, -1, -1, -1, -1];
 let mut top_fy: [int] = [-1, -1, -1, -1, -1, -1];
@@ -304,7 +340,8 @@ while candidate < 6 && top_fx[candidate].copy() >= 0 {
                                 let reply_score = if reply_target == ai_player => {
                                     -900000000
                                 } else => {
-                                    evaluate(ai_player)
+                                    let stand_pat = evaluate(ai_player);
+                                    capture_extension(ai_player, stand_pat)
                                 };
                                 bevy::Xiangqi::set_cell(rfx, rfy, reply_piece);
                                 bevy::Xiangqi::set_cell(rtx, rty, reply_target);
