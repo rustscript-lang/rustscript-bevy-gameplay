@@ -28,7 +28,7 @@ This uses upstream Bevy crates plus local `pd-vm` / `pd-host-function` paths.
 ## Run
 
 ```bash
-cargo test --tests --jobs 4
+cargo test --tests
 cargo run --example combat
 cargo run --example shooter
 ```
