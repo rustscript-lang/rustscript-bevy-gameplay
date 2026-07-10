@@ -558,6 +558,16 @@ fn handle_gomoku_editor_actions(
                     session.command(&mut scripts.editor, "locals");
                 }
             }
+            EditorAction::RunDebugCommand(command) => {
+                if let Some(session) = scripts.debug_session.as_ref() {
+                    session.console_command(&mut scripts.editor, &command);
+                }
+            }
+            EditorAction::EvaluateHover { tab, name } => {
+                if let Some(session) = scripts.debug_session.as_ref() {
+                    session.evaluate_hover(&mut scripts.editor, tab, &name);
+                }
+            }
             EditorAction::ToggleBreakpoint { tab, line, enabled } => {
                 if scripts.editor.debug_tab == Some(tab)
                     && let Some(session) = scripts.debug_session.as_ref()

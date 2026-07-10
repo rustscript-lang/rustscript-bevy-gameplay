@@ -59,10 +59,14 @@ pub struct LiveScriptEditor {
     pub debug_attached: bool,
     pub debug_starting: bool,
     pub debug_pending: bool,
+    pub console_input: String,
+    console_history: Vec<String>,
+    console_history_cursor: Option<usize>,
+    debug_hover: Option<DebugHoverState>,
     cooldown: Duration,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditorAction {
     StartDebug(usize),
     StopDebug,
@@ -70,11 +74,25 @@ pub enum EditorAction {
     NextDebug,
     ContinueDebug,
     RefreshLocals,
+    RunDebugCommand(String),
+    EvaluateHover {
+        tab: usize,
+        name: String,
+    },
     ToggleBreakpoint {
         tab: usize,
         line: u32,
         enabled: bool,
     },
+}
+
+#[derive(Debug, Clone)]
+struct DebugHoverState {
+    tab: usize,
+    name: String,
+    started_at: Instant,
+    requested: bool,
+    value: Option<String>,
 }
 
 pub struct DebugSession {
@@ -201,6 +219,30 @@ impl DebugSession {
         }
     }
 
+    pub fn console_command(&self, editor: &mut LiveScriptEditor, command: &str) {
+        append_debug_output(editor, &format!("> {command}\n"));
+        self.command(editor, command);
+    }
+
+    pub fn evaluate_hover(&self, editor: &mut LiveScriptEditor, tab: usize, name: &str) {
+        if self.tab != tab || !is_debug_identifier(name) {
+            return;
+        }
+        let value = match self
+            .bridge
+            .execute(format!("print {name}"), Duration::from_millis(120))
+        {
+            Ok(response) => response.output.trim().to_string(),
+            Err(err) => err.to_string(),
+        };
+        if let Some(hover) = editor.debug_hover.as_mut()
+            && hover.tab == tab
+            && hover.name == name
+        {
+            hover.value = Some(value);
+        }
+    }
+
     pub fn set_breakpoint(&self, editor: &mut LiveScriptEditor, line: u32, enabled: bool) {
         let full_line = self.source_line_offset.saturating_add(line);
         let command = if enabled {
@@ -260,6 +302,10 @@ impl LiveScriptEditor {
             debug_attached: false,
             debug_starting: false,
             debug_pending: false,
+            console_input: String::new(),
+            console_history: Vec::new(),
+            console_history_cursor: None,
+            debug_hover: None,
             cooldown: Duration::from_millis(850),
         }
     }
@@ -271,6 +317,7 @@ impl LiveScriptEditor {
         self.debug_attached = false;
         self.debug_starting = true;
         self.debug_pending = false;
+        self.debug_hover = None;
     }
 
     pub fn begin_pending_debug_session(&mut self, tab: usize) {
@@ -280,6 +327,7 @@ impl LiveScriptEditor {
         self.debug_attached = false;
         self.debug_starting = false;
         self.debug_pending = true;
+        self.debug_hover = None;
     }
 
     pub fn clear_debug_state(&mut self) {
@@ -289,6 +337,7 @@ impl LiveScriptEditor {
         self.debug_attached = false;
         self.debug_starting = false;
         self.debug_pending = false;
+        self.debug_hover = None;
     }
 
     pub fn reset_active_tab(&mut self, active: usize) -> EditorAction {
@@ -463,13 +512,9 @@ impl LiveScriptEditor {
         });
 
         let code_width = ui.available_width().max(160.0);
-        let debug_output_height = if self.debug_output.trim().is_empty() {
-            0.0
-        } else {
-            190.0
-        };
+        let console_height = 178.0;
         let remaining_height = ui.available_height().max(panel_height - 140.0);
-        let code_height = (remaining_height - debug_output_height - 18.0).max(260.0);
+        let code_height = (remaining_height - console_height - 48.0).max(240.0);
         let line_count = tab.buffer.lines().count().max(1);
         let row_height = ui.text_style_height(&egui::TextStyle::Monospace).max(16.0);
         let content_height = (line_count as f32 * row_height + 24.0).max(code_height);
@@ -489,6 +534,8 @@ impl LiveScriptEditor {
             ui.fonts_mut(|fonts| fonts.layout_job(job))
         };
         let mut response_changed = false;
+        let mut hovered_name = None;
+        let mut editor_response = None;
         egui::ScrollArea::both()
             .id_salt(("live_rustscript_code", active))
             .max_height(code_height)
@@ -543,16 +590,31 @@ impl LiveScriptEditor {
                             }
                         }
                     });
-                    let response = ui.add_sized(
-                        [text_width, content_height],
-                        egui::TextEdit::multiline(&mut tab.buffer)
-                            .font(egui::TextStyle::Monospace)
-                            .desired_width(text_width)
-                            .desired_rows(line_count)
-                            .lock_focus(true)
-                            .layouter(&mut layouter),
-                    );
-                    response_changed = response.changed();
+                    let output = ui
+                        .scope(|ui| {
+                            ui.set_min_size(egui::vec2(text_width, content_height));
+                            egui::TextEdit::multiline(&mut tab.buffer)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(text_width)
+                                .desired_rows(line_count)
+                                .lock_focus(true)
+                                .layouter(&mut layouter)
+                                .show(ui)
+                        })
+                        .inner;
+                    response_changed = output.response.changed();
+                    if self.debug_attached
+                        && self.debug_tab == Some(active)
+                        && output.response.hovered()
+                        && let Some(pointer_pos) = ui.ctx().pointer_hover_pos()
+                        && output.text_clip_rect.contains(pointer_pos)
+                    {
+                        let cursor = output
+                            .galley
+                            .cursor_from_pos(pointer_pos - output.galley_pos);
+                        hovered_name = identifier_at_char_index(&tab.buffer, cursor.index);
+                    }
+                    editor_response = Some(output.response);
                 });
             });
         if response_changed {
@@ -566,19 +628,171 @@ impl LiveScriptEditor {
         }
         render_script_diagnostics(ui, &tab.diagnostics);
 
-        if !self.debug_output.trim().is_empty() {
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .id_salt("live_rustscript_debug_output")
-                .max_height(180.0)
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    ui.set_width(code_width);
-                    ui.monospace(&self.debug_output);
-                });
+        let now = Instant::now();
+        match hovered_name {
+            Some(name) => {
+                let is_same = self
+                    .debug_hover
+                    .as_ref()
+                    .is_some_and(|hover| hover.tab == active && hover.name == name);
+                if !is_same {
+                    self.debug_hover = Some(DebugHoverState {
+                        tab: active,
+                        name,
+                        started_at: now,
+                        requested: false,
+                        value: None,
+                    });
+                }
+            }
+            None => self.debug_hover = None,
         }
+        if let Some(hover) = self.debug_hover.as_mut()
+            && !hover.requested
+            && now.duration_since(hover.started_at) >= Duration::from_millis(280)
+        {
+            hover.requested = true;
+            actions.push(EditorAction::EvaluateHover {
+                tab: hover.tab,
+                name: hover.name.clone(),
+            });
+        }
+        if let (Some(response), Some(hover)) = (editor_response, self.debug_hover.as_ref()) {
+            let value = hover.value.as_deref().unwrap_or("loading...");
+            response.on_hover_ui_at_pointer(|ui| {
+                ui.label(egui::RichText::new(&hover.name).monospace().strong());
+                ui.label(egui::RichText::new(value).monospace());
+            });
+        }
+
+        ui.separator();
+        render_debug_console(ui, self, code_width, console_height, &mut actions);
         actions
     }
+}
+
+fn render_debug_console(
+    ui: &mut egui::Ui,
+    editor: &mut LiveScriptEditor,
+    width: f32,
+    height: f32,
+    actions: &mut Vec<EditorAction>,
+) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("DEBUG CONSOLE").strong().size(11.0));
+        let status = if editor.debug_attached {
+            "paused"
+        } else if editor.debug_starting || editor.debug_pending {
+            "waiting"
+        } else {
+            "inactive"
+        };
+        ui.label(
+            egui::RichText::new(status)
+                .monospace()
+                .size(10.0)
+                .color(egui::Color32::from_rgb(132, 146, 164)),
+        );
+    });
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(22, 25, 30))
+        .inner_margin(egui::Margin::same(6))
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("live_rustscript_debug_console")
+                .max_height(height - 48.0)
+                .min_scrolled_height(height - 48.0)
+                .stick_to_bottom(true)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_width((width - 16.0).max(120.0));
+                    let output = if editor.debug_output.trim().is_empty() {
+                        "Start a debug session to run commands."
+                    } else {
+                        &editor.debug_output
+                    };
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(output)
+                                .monospace()
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(202, 212, 224)),
+                        )
+                        .selectable(true),
+                    );
+                });
+        });
+
+    let mut submit = false;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(">").monospace().strong());
+        let input_width = (ui.available_width() - 48.0).max(80.0);
+        let response = ui.add_enabled(
+            editor.debug_attached,
+            egui::TextEdit::singleline(&mut editor.console_input)
+                .font(egui::TextStyle::Monospace)
+                .desired_width(input_width)
+                .hint_text("help | locals | print name | where"),
+        );
+        let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
+        submit |= console_enter_submits(response.has_focus(), response.lost_focus(), enter);
+
+        if response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
+            move_console_history(editor, -1);
+        }
+        if response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::ArrowDown)) {
+            move_console_history(editor, 1);
+        }
+        submit |= ui
+            .add_enabled(editor.debug_attached, egui::Button::new("Run"))
+            .clicked();
+    });
+    if submit {
+        submit_console_input(editor, actions);
+    }
+}
+
+fn console_enter_submits(has_focus: bool, lost_focus: bool, enter: bool) -> bool {
+    (has_focus || lost_focus) && enter
+}
+
+fn submit_console_input(editor: &mut LiveScriptEditor, actions: &mut Vec<EditorAction>) {
+    let command = editor.console_input.trim().to_string();
+    if command.is_empty() {
+        return;
+    }
+    if editor.console_history.last() != Some(&command) {
+        editor.console_history.push(command.clone());
+        const MAX_CONSOLE_HISTORY: usize = 64;
+        if editor.console_history.len() > MAX_CONSOLE_HISTORY {
+            editor.console_history.remove(0);
+        }
+    }
+    editor.console_history_cursor = None;
+    editor.console_input.clear();
+    actions.push(EditorAction::RunDebugCommand(command));
+}
+
+fn move_console_history(editor: &mut LiveScriptEditor, direction: i32) {
+    if editor.console_history.is_empty() {
+        return;
+    }
+    let len = editor.console_history.len();
+    let next = match (editor.console_history_cursor, direction.signum()) {
+        (None, -1) => len - 1,
+        (Some(index), -1) => index.saturating_sub(1),
+        (Some(index), 1) if index + 1 < len => index + 1,
+        (Some(_), 1) | (None, 1) => {
+            editor.console_history_cursor = None;
+            editor.console_input.clear();
+            return;
+        }
+        _ => return,
+    };
+    editor.console_history_cursor = Some(next);
+    editor
+        .console_input
+        .clone_from(&editor.console_history[next]);
 }
 
 fn status_color(tab: &ScriptTab) -> egui::Color32 {
@@ -786,6 +1000,49 @@ fn is_ident_start(ch: char) -> bool {
 
 fn is_ident_continue(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn is_debug_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(is_ident_start) && chars.all(is_ident_continue)
+}
+
+fn identifier_at_char_index(source: &str, char_index: usize) -> Option<String> {
+    let chars = source.char_indices().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return None;
+    }
+    let target = if char_index < chars.len() && is_ident_continue(chars[char_index].1) {
+        char_index
+    } else if char_index > 0 && is_ident_continue(chars[char_index.min(chars.len()) - 1].1) {
+        char_index.min(chars.len()) - 1
+    } else {
+        return None;
+    };
+    let mut start = target;
+    while start > 0 && is_ident_continue(chars[start - 1].1) {
+        start -= 1;
+    }
+    let mut end = target + 1;
+    while end < chars.len() && is_ident_continue(chars[end].1) {
+        end += 1;
+    }
+    let start_byte = chars[start].0;
+    let end_byte = chars
+        .get(end)
+        .map(|(byte, _)| *byte)
+        .unwrap_or(source.len());
+    let name = &source[start_byte..end_byte];
+    if !is_debug_identifier(name)
+        || SCRIPT_KEYWORDS.contains(&name)
+        || SCRIPT_TYPES.contains(&name)
+        || source[..start_byte].ends_with("::")
+        || source[end_byte..].starts_with("::")
+        || source[end_byte..].trim_start().starts_with('(')
+    {
+        return None;
+    }
+    Some(name.to_string())
 }
 
 fn next_non_ws_starts_with(source: &str, cursor: usize, needle: char) -> bool {
@@ -1148,6 +1405,100 @@ mod tests {
         assert_eq!(visible_debug_line(Some(4), 3), Some(1));
         assert_eq!(visible_debug_line(Some(9), 3), Some(6));
         assert_eq!(visible_debug_line(None, 3), None);
+    }
+
+    #[test]
+    fn hover_identifier_selects_locals_and_skips_language_tokens() {
+        let source = "let score: int = board_value + helper(score);";
+        let score_index = source.find("score").unwrap() + 2;
+        let board_index = source.find("board_value").unwrap() + 5;
+        let helper_index = source.find("helper").unwrap() + 2;
+        let let_index = source.find("let").unwrap() + 1;
+
+        assert_eq!(
+            identifier_at_char_index(source, score_index),
+            Some("score".to_string())
+        );
+        assert_eq!(
+            identifier_at_char_index(source, board_index),
+            Some("board_value".to_string())
+        );
+        assert_eq!(identifier_at_char_index(source, helper_index), None);
+        assert_eq!(identifier_at_char_index(source, let_index), None);
+    }
+
+    #[test]
+    fn debugger_hover_uses_print_local_command() {
+        use std::{sync::mpsc, thread};
+        use vm::{Debugger, Vm};
+
+        let compiled = compile_source("let value: int = 42;\nvalue;\n").unwrap();
+        let bridge = DebugCommandBridge::new();
+        let thread_bridge = bridge.clone();
+        let (_sender, receiver) = mpsc::channel();
+        let mut session = DebugSession::new(bridge, receiver, 0, 0, Vec::new());
+        let mut editor = LiveScriptEditor::new(vec![ScriptTab::new(
+            "move.rss",
+            "let value: int = 42;\nvalue;\n",
+            "",
+            HOSTS,
+        )]);
+        editor.begin_debug_session(0);
+        thread::spawn(move || {
+            let mut debugger = Debugger::with_command_bridge(thread_bridge);
+            debugger.stop_on_entry();
+            let mut vm = Vm::new(compiled.program);
+            let _ = vm.run_with_debugger(&mut debugger);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            session.poll(&mut editor);
+            if editor.debug_attached {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        editor.debug_hover = Some(DebugHoverState {
+            tab: 0,
+            name: "value".to_string(),
+            started_at: Instant::now(),
+            requested: true,
+            value: None,
+        });
+
+        session.evaluate_hover(&mut editor, 0, "value");
+
+        assert!(
+            editor
+                .debug_hover
+                .as_ref()
+                .and_then(|hover| hover.value.as_deref())
+                .is_some_and(|value| value.contains("value ="))
+        );
+        session.command(&mut editor, "continue");
+    }
+
+    #[test]
+    fn console_enter_after_focus_loss_submits_command() {
+        let mut editor = LiveScriptEditor::new(vec![ScriptTab::new(
+            "move.rss",
+            "let value: int = 1;",
+            "",
+            HOSTS,
+        )]);
+        editor.console_input = "  help  ".to_string();
+        let mut actions = Vec::new();
+
+        assert!(console_enter_submits(false, true, true));
+        submit_console_input(&mut editor, &mut actions);
+
+        assert_eq!(
+            actions,
+            vec![EditorAction::RunDebugCommand("help".to_string())]
+        );
+        assert!(editor.console_input.is_empty());
+        assert_eq!(editor.console_history, vec!["help".to_string()]);
     }
 
     #[test]
