@@ -14,13 +14,19 @@ fn run_script_smoke_from_empty_cwd(example: &str) -> Output {
     }
     fs::create_dir_all(&cwd).expect("smoke cwd should be created");
 
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest = manifest_dir.join("Cargo.toml");
+    let target_dir = manifest_dir.join("target").join("script-smoke");
     let output = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()))
         .args([
             "run",
             "--quiet",
             "--manifest-path",
             manifest.to_str().expect("manifest path should be UTF-8"),
+            "--target-dir",
+            target_dir
+                .to_str()
+                .expect("target dir path should be UTF-8"),
             "--example",
             example,
             "--",
