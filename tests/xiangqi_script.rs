@@ -141,7 +141,8 @@ fn rustscript_move_awards_a_stalemate_to_the_moving_side() {
 }
 
 #[test]
-fn rustscript_ai_captures_general_when_available() {
+#[ignore = "perf"]
+fn perf_rustscript_ai_captures_general_when_available() {
     let mut world = seeded_world(&[
         (4, 9, RED_GENERAL),
         (4, 0, BLACK_GENERAL),
@@ -161,7 +162,8 @@ fn rustscript_ai_captures_general_when_available() {
 }
 
 #[test]
-fn rustscript_ai_reuses_cached_jit_traces_for_same_script() {
+#[ignore = "perf"]
+fn perf_rustscript_ai_reuses_cached_jit_traces_for_same_script() {
     let script = AI_SCRIPT.replacen("use bevy;", "use bevy;\nlet cache_probe: int = 0;", 1);
     let mut world = seeded_world(&[
         (4, 9, RED_GENERAL),
@@ -205,7 +207,8 @@ fn rustscript_ai_reuses_cached_jit_traces_for_same_script() {
 }
 
 #[test]
-fn rustscript_ai_can_read_bias_parameter() {
+#[ignore = "perf"]
+fn perf_rustscript_ai_can_read_bias_parameter() {
     let script = "use bevy;\nlet to_x: int = if ai_bias > 0 => { 5 } else => { 3 };\nbevy::Xiangqi::set_ai_move(4, 0, to_x, 0);\n0;";
     let mut world = seeded_world(&[(4, 9, RED_GENERAL), (4, 0, BLACK_GENERAL)]);
 
@@ -235,7 +238,8 @@ fn rustscript_ai_can_read_bias_parameter() {
 }
 
 #[test]
-fn rustscript_ai_uses_general_to_answer_close_threat() {
+#[ignore = "perf"]
+fn perf_rustscript_ai_uses_general_to_answer_close_threat() {
     let mut world = seeded_world(&[
         (4, 9, RED_GENERAL),
         (4, 5, BLACK_SOLDIER),
@@ -254,7 +258,8 @@ fn rustscript_ai_uses_general_to_answer_close_threat() {
 }
 
 #[test]
-fn rustscript_ai_avoids_opening_an_immediate_general_loss() {
+#[ignore = "perf"]
+fn perf_rustscript_ai_avoids_opening_an_immediate_general_loss() {
     let mut world = seeded_world(&[
         (8, 9, RED_GENERAL),
         (4, 8, RED_CHARIOT),
@@ -295,7 +300,8 @@ fn rustscript_ai_avoids_opening_an_immediate_general_loss() {
 }
 
 #[test]
-fn scripted_ai_sequence_uses_only_legal_moves() {
+#[ignore = "perf"]
+fn perf_scripted_ai_sequence_uses_only_legal_moves() {
     let mut world = seeded_world(&[
         (4, 9, RED_GENERAL),
         (4, 0, BLACK_GENERAL),

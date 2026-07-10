@@ -11,8 +11,8 @@ const XIANGQI_MOVE: &str = include_str!("../scripts/xiangqi_move.rss");
 const XIANGQI_AI: &str = include_str!("../scripts/xiangqi_ai.rss");
 
 #[test]
-#[ignore = "perf test"]
-fn gomoku_ai_self_play_is_legal_deterministic_and_responsive() {
+#[ignore = "perf"]
+fn perf_gomoku_ai_self_play_is_legal_deterministic_and_responsive() {
     let mut first = bevy_ecs::world::World::new();
     let mut second = bevy_ecs::world::World::new();
     reset_gomoku_board(&mut first);
@@ -63,8 +63,8 @@ fn gomoku_ai_self_play_is_legal_deterministic_and_responsive() {
 }
 
 #[test]
-#[ignore = "perf test"]
-fn xiangqi_ai_self_play_produces_legal_moves_with_bounded_latency() {
+#[ignore = "perf"]
+fn perf_xiangqi_ai_self_play_produces_legal_moves_with_bounded_latency() {
     let mut world = bevy_ecs::world::World::new();
     reset_xiangqi_board(&mut world);
     let mut plies = 0_u128;

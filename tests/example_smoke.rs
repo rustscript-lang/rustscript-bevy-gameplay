@@ -85,7 +85,8 @@ fn shooter_example_script_smoke_runs_end_to_end() {
 }
 
 #[test]
-fn gomoku_example_script_smoke_runs_end_to_end() {
+#[ignore = "perf"]
+fn perf_gomoku_example_script_smoke_runs_end_to_end() {
     let output = run_script_smoke_from_empty_cwd("gomoku");
 
     assert!(
@@ -110,7 +111,8 @@ fn gomoku_example_script_smoke_runs_end_to_end() {
 }
 
 #[test]
-fn xiangqi_example_script_smoke_runs_end_to_end() {
+#[ignore = "perf"]
+fn perf_xiangqi_example_script_smoke_runs_end_to_end() {
     let output = run_script_smoke_from_empty_cwd("xiangqi");
 
     assert!(

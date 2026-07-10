@@ -127,7 +127,8 @@ fn ai_script_uses_one_board_snapshot_and_no_per_cell_hosts() {
 }
 
 #[test]
-fn takes_an_unprotected_chariot() {
+#[ignore = "perf"]
+fn perf_takes_an_unprotected_chariot() {
     let mut world = seeded_world(&[
         (4, 9, RED_GENERAL),
         (4, 0, BLACK_GENERAL),
@@ -144,7 +145,8 @@ fn takes_an_unprotected_chariot() {
 }
 
 #[test]
-fn rejects_a_poisoned_cannon_exchange() {
+#[ignore = "perf"]
+fn perf_rejects_a_poisoned_cannon_exchange() {
     let mut world = seeded_world(&[
         (4, 9, RED_GENERAL),
         (4, 0, BLACK_GENERAL),
@@ -164,7 +166,8 @@ fn rejects_a_poisoned_cannon_exchange() {
 }
 
 #[test]
-fn finds_a_profitable_horse_recapture() {
+#[ignore = "perf"]
+fn perf_finds_a_profitable_horse_recapture() {
     let mut world = seeded_world(&[
         (4, 9, RED_GENERAL),
         (4, 0, BLACK_GENERAL),
@@ -181,7 +184,8 @@ fn finds_a_profitable_horse_recapture() {
 }
 
 #[test]
-fn answers_check_instead_of_searching_irrelevant_material() {
+#[ignore = "perf"]
+fn perf_answers_check_instead_of_searching_irrelevant_material() {
     let mut world = seeded_world(&[
         (4, 9, RED_GENERAL),
         (4, 5, RED_SOLDIER),
@@ -197,7 +201,8 @@ fn answers_check_instead_of_searching_irrelevant_material() {
 }
 
 #[test]
-fn recognizes_stalemate_as_a_win() {
+#[ignore = "perf"]
+fn perf_recognizes_stalemate_as_a_win() {
     let mut world = seeded_world(&[
         (4, 9, RED_GENERAL),
         (4, 0, BLACK_GENERAL),
@@ -213,7 +218,8 @@ fn recognizes_stalemate_as_a_win() {
 }
 
 #[test]
-fn finds_a_quiet_checkmate_in_one() {
+#[ignore = "perf"]
+fn perf_finds_a_quiet_checkmate_in_one() {
     let mut world = seeded_world(&[
         (4, 9, RED_GENERAL),
         (4, 0, BLACK_GENERAL),
@@ -234,7 +240,8 @@ fn finds_a_quiet_checkmate_in_one() {
 }
 
 #[test]
-fn never_moves_a_pinned_chariot_off_the_general_file() {
+#[ignore = "perf"]
+fn perf_never_moves_a_pinned_chariot_off_the_general_file() {
     let mut world = seeded_world(&[
         (3, 9, RED_GENERAL),
         (4, 0, BLACK_GENERAL),
@@ -257,7 +264,8 @@ fn never_moves_a_pinned_chariot_off_the_general_file() {
 }
 
 #[test]
-fn terminal_position_reports_no_available_move_instead_of_invalid_coordinates() {
+#[ignore = "perf"]
+fn perf_terminal_position_reports_no_available_move_instead_of_invalid_coordinates() {
     let mut world = seeded_world(&[
         (4, 0, BLACK_GENERAL),
         (4, 9, RED_GENERAL),

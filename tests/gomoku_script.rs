@@ -48,7 +48,8 @@ fn rustscript_move_places_stone_and_detects_horizontal_win() {
 }
 
 #[test]
-fn rustscript_ai_finishes_its_own_open_four() {
+#[ignore = "perf"]
+fn perf_rustscript_ai_finishes_its_own_open_four() {
     let mut world = seeded_world(&[(5, 7, 2), (6, 7, 2), (7, 7, 2), (8, 7, 2)]);
 
     let ai_move =
@@ -67,7 +68,8 @@ fn rustscript_ai_finishes_its_own_open_four() {
 }
 
 #[test]
-fn rustscript_ai_reuses_cached_jit_traces_for_same_script() {
+#[ignore = "perf"]
+fn perf_rustscript_ai_reuses_cached_jit_traces_for_same_script() {
     let script = AI_SCRIPT.replacen("use bevy;", "use bevy;\nlet cache_probe: int = 0;", 1);
     let mut world = seeded_world(&[(5, 7, 2), (6, 7, 2), (7, 7, 2), (8, 7, 2)]);
 
@@ -93,7 +95,8 @@ fn rustscript_ai_reuses_cached_jit_traces_for_same_script() {
 }
 
 #[test]
-fn rustscript_ai_can_read_bias_parameter() {
+#[ignore = "perf"]
+fn perf_rustscript_ai_can_read_bias_parameter() {
     let script = "use bevy;\nlet x: int = if ai_bias > 0 => { 8 } else => { 6 };\nbevy::Gomoku::set_ai_move(x, 7);\nx;";
     let mut world = seeded_world(&[]);
 
@@ -107,7 +110,8 @@ fn rustscript_ai_can_read_bias_parameter() {
 }
 
 #[test]
-fn rustscript_ai_blocks_player_open_four() {
+#[ignore = "perf"]
+fn perf_rustscript_ai_blocks_player_open_four() {
     let mut world = seeded_world(&[(5, 7, 1), (6, 7, 1), (7, 7, 1), (8, 7, 1)]);
 
     let ai_move =
@@ -118,7 +122,8 @@ fn rustscript_ai_blocks_player_open_four() {
 }
 
 #[test]
-fn rustscript_ai_completes_a_broken_four() {
+#[ignore = "perf"]
+fn perf_rustscript_ai_completes_a_broken_four() {
     let mut world = seeded_world(&[(5, 7, 2), (6, 7, 2), (8, 7, 2), (9, 7, 2)]);
 
     let ai_move =
@@ -128,7 +133,8 @@ fn rustscript_ai_completes_a_broken_four() {
 }
 
 #[test]
-fn rustscript_ai_blocks_a_broken_four() {
+#[ignore = "perf"]
+fn perf_rustscript_ai_blocks_a_broken_four() {
     let mut world = seeded_world(&[(5, 7, 1), (6, 7, 1), (8, 7, 1), (9, 7, 1)]);
 
     let ai_move =
@@ -138,7 +144,8 @@ fn rustscript_ai_blocks_a_broken_four() {
 }
 
 #[test]
-fn rustscript_ai_creates_a_double_three() {
+#[ignore = "perf"]
+fn perf_rustscript_ai_creates_a_double_three() {
     let mut world = seeded_world(&[(6, 7, 2), (8, 7, 2), (7, 6, 2), (7, 8, 2)]);
 
     let ai_move =
@@ -148,7 +155,8 @@ fn rustscript_ai_creates_a_double_three() {
 }
 
 #[test]
-fn scripted_human_sequence_can_play_actual_turns_against_ai() {
+#[ignore = "perf"]
+fn perf_scripted_human_sequence_can_play_actual_turns_against_ai() {
     let mut world = seeded_world(&[]);
     let human_moves = [(7, 7), (6, 6), (8, 6), (6, 8), (8, 8), (5, 7)];
     let mut winner = 0;

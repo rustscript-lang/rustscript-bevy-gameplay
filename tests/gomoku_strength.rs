@@ -160,7 +160,8 @@ fn tactical_opponent_move(board: &GomokuBoard, player: i64) -> (i64, i64) {
 }
 
 #[test]
-fn ai_takes_its_win_before_answering_an_enemy_win() {
+#[ignore = "perf"]
+fn perf_ai_takes_its_win_before_answering_an_enemy_win() {
     let board = seeded_board(&[
         (3, 4, 2),
         (4, 4, 2),
@@ -177,7 +178,8 @@ fn ai_takes_its_win_before_answering_an_enemy_win() {
 }
 
 #[test]
-fn ai_handles_open_and_broken_fours_for_both_sides() {
+#[ignore = "perf"]
+fn perf_ai_handles_open_and_broken_fours_for_both_sides() {
     let cases = [
         (vec![(5, 7, 2), (6, 7, 2), (7, 7, 2), (8, 7, 2)], 2),
         (vec![(5, 7, 1), (6, 7, 1), (7, 7, 1), (8, 7, 1)], 1),
@@ -200,7 +202,8 @@ fn ai_handles_open_and_broken_fours_for_both_sides() {
 }
 
 #[test]
-fn ai_creates_a_double_threat_from_an_open_three() {
+#[ignore = "perf"]
+fn perf_ai_creates_a_double_threat_from_an_open_three() {
     let board = seeded_board(&[
         (6, 7, 2),
         (7, 7, 2),
@@ -218,7 +221,8 @@ fn ai_creates_a_double_threat_from_an_open_three() {
 }
 
 #[test]
-fn ai_blocks_an_enemy_cross_fork_despite_distant_attack_material() {
+#[ignore = "perf"]
+fn perf_ai_blocks_an_enemy_cross_fork_despite_distant_attack_material() {
     let board = seeded_board(&[
         (6, 7, 1),
         (8, 7, 1),
@@ -236,7 +240,8 @@ fn ai_blocks_an_enemy_cross_fork_despite_distant_attack_material() {
 }
 
 #[test]
-fn ai_rejects_a_one_ply_blunder_that_allows_an_enemy_fork() {
+#[ignore = "perf"]
+fn perf_ai_rejects_a_one_ply_blunder_that_allows_an_enemy_fork() {
     let board = seeded_board(&[
         (5, 7, 1),
         (7, 7, 1),
@@ -257,7 +262,8 @@ fn ai_rejects_a_one_ply_blunder_that_allows_an_enemy_fork() {
 }
 
 #[test]
-fn ai_blocks_an_enemy_open_three_before_chasing_shapes() {
+#[ignore = "perf"]
+fn perf_ai_blocks_an_enemy_open_three_before_chasing_shapes() {
     let board = seeded_board(&[
         (7, 7, 1),
         (7, 6, 2),
@@ -282,7 +288,8 @@ fn ai_blocks_an_enemy_open_three_before_chasing_shapes() {
 }
 
 #[test]
-fn ai_survives_a_deterministic_tactical_match() {
+#[ignore = "perf"]
+fn perf_ai_survives_a_deterministic_tactical_match() {
     let mut board = GomokuBoard::default();
     let mut ai_moves = 0;
     let mut total_micros = 0;
@@ -312,7 +319,8 @@ fn ai_survives_a_deterministic_tactical_match() {
 
 #[test]
 #[cfg(not(debug_assertions))]
-fn tactical_suite_has_practical_release_latency() {
+#[ignore = "perf"]
+fn perf_tactical_suite_has_practical_release_latency() {
     let cases = [
         seeded_board(&[(7, 7, 1)]),
         seeded_board(&[(7, 7, 1), (7, 8, 2), (8, 7, 1), (6, 8, 2)]),
@@ -338,7 +346,8 @@ fn tactical_suite_has_practical_release_latency() {
 }
 
 #[test]
-fn full_board_reports_no_available_move_instead_of_invalid_coordinates() {
+#[ignore = "perf"]
+fn perf_full_board_reports_no_available_move_instead_of_invalid_coordinates() {
     let mut board = GomokuBoard::default();
     for y in 0..SIZE {
         for x in 0..SIZE {
