@@ -1,4 +1,7 @@
-use std::{sync::mpsc, thread};
+use std::{
+    sync::{Arc, Mutex, mpsc},
+    thread,
+};
 
 use bevy::{
     prelude::*,
@@ -72,6 +75,7 @@ impl Default for XiangqiUiState {
 struct XiangqiScripts {
     editor: LiveScriptEditor,
     debug_session: Option<DebugSession>,
+    pending_ai_debug: Option<Arc<Mutex<mpsc::Receiver<Result<XiangqiAiMove, String>>>>>,
 }
 
 impl Default for XiangqiScripts {
@@ -89,6 +93,7 @@ impl Default for XiangqiScripts {
         Self {
             editor,
             debug_session: None,
+            pending_ai_debug: None,
         }
     }
 }
@@ -208,6 +213,7 @@ fn xiangqi_ui(world: &mut World) {
     if let Some(session) = scripts.debug_session.as_mut() {
         session.poll(&mut scripts.editor);
     }
+    poll_xiangqi_ai_debug_result(world, &mut scripts, &mut state);
     let mut clicked = None;
     let mut restart = false;
     let mut pending_import = None;
@@ -226,14 +232,16 @@ fn xiangqi_ui(world: &mut World) {
     egui::CentralPanel::default()
         .frame(egui::Frame::new().fill(egui::Color32::from_rgb(18, 20, 22)))
         .show(ctx, |ui| {
+            let row_height = ui.available_height();
             ui.horizontal(|ui| {
-                let editor_width = 520.0;
+                let editor_width = 640.0;
                 let gap = 14.0;
                 let board_area_width = (ui.available_width() - editor_width - gap).max(400.0);
                 ui.allocate_ui_with_layout(
-                    egui::vec2(board_area_width, ui.available_height()),
+                    egui::vec2(board_area_width, row_height),
                     egui::Layout::top_down(egui::Align::Center),
                     |ui| {
+                        ui.set_min_height(row_height);
                         ui.add_space(10.0);
                         ui.heading(egui::RichText::new("RustScript Xiangqi").size(32.0));
                         ui.add_space(4.0);
@@ -280,6 +288,8 @@ fn xiangqi_ui(world: &mut World) {
                         let available_h = (ui.max_rect().height() - 170.0).max(620.0);
                         let board_w = available_w.min(available_h * 8.0 / 9.0).max(360.0);
                         let board_h = board_w * 9.0 / 8.0;
+                        let vertical_space = ((ui.available_height() - board_h) * 0.5).max(0.0);
+                        ui.add_space(vertical_space);
                         let leading_space = centered_board_leading_space(available_width, board_w);
                         ui.horizontal(|ui| {
                             ui.add_space(leading_space);
@@ -291,9 +301,10 @@ fn xiangqi_ui(world: &mut World) {
                 ui.separator();
                 ui.add_space(gap);
                 ui.allocate_ui_with_layout(
-                    egui::vec2(editor_width, ui.available_height()),
+                    egui::vec2(editor_width, row_height),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
+                        ui.set_min_height(row_height);
                         editor_actions = scripts.editor.ui(ui);
                     },
                 );
@@ -608,6 +619,17 @@ fn play_human_turn(world: &mut World, from_x: i64, from_y: i64, to_x: i64, to_y:
         return;
     }
 
+    if let Some(mut scripts) = world.remove_resource::<XiangqiScripts>() {
+        let started_debug = start_xiangqi_ai_debug_for_turn(world, &mut scripts, ai_script.clone());
+        world.insert_resource(scripts);
+        if started_debug {
+            let mut state = world.resource_mut::<XiangqiUiState>();
+            state.message = "AI debugger paused".to_string();
+            state.selected = None;
+            return;
+        }
+    }
+
     let ai_move = match choose_xiangqi_ai_move(world, &ai_script, BLACK) {
         Ok(ai_move) => ai_move,
         Err(err) => {
@@ -653,6 +675,8 @@ fn handle_xiangqi_editor_actions(
             EditorAction::StartDebug(tab) => start_xiangqi_debug_session(world, scripts, tab),
             EditorAction::StopDebug => {
                 scripts.debug_session = None;
+                scripts.pending_ai_debug = None;
+                scripts.editor.clear_debug_state();
             }
             EditorAction::StepDebug => {
                 if let Some(session) = scripts.debug_session.as_ref() {
@@ -674,13 +698,26 @@ fn handle_xiangqi_editor_actions(
                     session.command(&mut scripts.editor, "locals");
                 }
             }
+            EditorAction::ToggleBreakpoint { tab, line, enabled } => {
+                if scripts.editor.debug_tab == Some(tab)
+                    && let Some(session) = scripts.debug_session.as_ref()
+                {
+                    session.set_breakpoint(&mut scripts.editor, line, enabled);
+                }
+            }
         }
     }
 }
 
 fn start_xiangqi_debug_session(world: &mut World, scripts: &mut XiangqiScripts, tab: usize) {
+    if tab == AI_TAB {
+        scripts.debug_session = None;
+        scripts.pending_ai_debug = None;
+        scripts.editor.begin_pending_debug_session(tab);
+        return;
+    }
     let source = scripts.editor.active_source(tab).to_string();
-    let source_line_offset = scripts.editor.tabs[tab].lint_prefix.lines().count() as u32;
+    let source_line_offset = scripts.editor.source_line_offset(tab);
     let board = world.resource::<XiangqiBoard>().clone();
     let bridge = DebugCommandBridge::new();
     let thread_bridge = bridge.clone();
@@ -708,8 +745,130 @@ fn start_xiangqi_debug_session(world: &mut World, scripts: &mut XiangqiScripts, 
         };
         let _ = sender.send(result.unwrap_or_else(|err| format!("debug error: {err}")));
     });
-    scripts.editor.begin_debug_session();
-    scripts.debug_session = Some(DebugSession::new(bridge, receiver, source_line_offset));
+    scripts.editor.begin_debug_session(tab);
+    scripts.debug_session = Some(DebugSession::new(
+        bridge,
+        receiver,
+        tab,
+        source_line_offset,
+        scripts.editor.user_breakpoints(tab),
+    ));
+}
+
+fn start_xiangqi_ai_debug_for_turn(
+    world: &mut World,
+    scripts: &mut XiangqiScripts,
+    source: String,
+) -> bool {
+    if !(scripts.editor.debug_pending && scripts.editor.debug_tab == Some(AI_TAB)) {
+        return false;
+    }
+    let source_line_offset = scripts.editor.source_line_offset(AI_TAB);
+    let board = world.resource::<XiangqiBoard>().clone();
+    let bridge = DebugCommandBridge::new();
+    let thread_bridge = bridge.clone();
+    let (output_sender, output_receiver) = mpsc::channel::<String>();
+    let (result_sender, result_receiver) = mpsc::channel::<Result<XiangqiAiMove, String>>();
+    thread::spawn(move || {
+        let mut debug_world = World::new();
+        debug_world.insert_resource(board);
+        let mut debugger = Debugger::with_command_bridge(thread_bridge);
+        debugger.stop_on_entry();
+        let result = debug_xiangqi_ai_script(&mut debug_world, &source, BLACK, &mut debugger);
+        let output = result
+            .as_ref()
+            .map(|mv| {
+                format!(
+                    "debug complete: ai=({}, {}) -> ({}, {})",
+                    mv.from_x, mv.from_y, mv.to_x, mv.to_y
+                )
+            })
+            .unwrap_or_else(|err| format!("debug error: {err}"));
+        let _ = output_sender.send(output);
+        let _ = result_sender.send(result);
+    });
+    scripts.editor.begin_debug_session(AI_TAB);
+    scripts.debug_session = Some(DebugSession::new(
+        bridge,
+        output_receiver,
+        AI_TAB,
+        source_line_offset,
+        scripts.editor.user_breakpoints(AI_TAB),
+    ));
+    scripts.pending_ai_debug = Some(Arc::new(Mutex::new(result_receiver)));
+    true
+}
+
+fn poll_xiangqi_ai_debug_result(
+    world: &mut World,
+    scripts: &mut XiangqiScripts,
+    state: &mut XiangqiUiState,
+) {
+    let Some(receiver) = scripts.pending_ai_debug.as_ref() else {
+        return;
+    };
+    let result = {
+        let Ok(receiver) = receiver.lock() else {
+            scripts.pending_ai_debug = None;
+            state.message = "AI debug channel error".to_string();
+            state.selected = None;
+            return;
+        };
+        let Ok(result) = receiver.try_recv() else {
+            return;
+        };
+        result
+    };
+    scripts.pending_ai_debug = None;
+    scripts.debug_session = None;
+    scripts.editor.debug_attached = false;
+    scripts.editor.debug_starting = false;
+    scripts.editor.debug_pending = false;
+    scripts.editor.debug_line = None;
+
+    let ai_move = match result {
+        Ok(ai_move) => ai_move,
+        Err(err) => {
+            state.message = format!("AI debug error: {err}");
+            state.selected = None;
+            return;
+        }
+    };
+    state.jit_enabled = ai_move.telemetry.jit_enabled;
+    state.jit_trace_count = ai_move.telemetry.jit_trace_count;
+    state.last_ai_move_micros = Some(ai_move.telemetry.elapsed_micros);
+
+    let move_script = scripts.editor.active_source(MOVE_TAB).to_string();
+    match apply_xiangqi_move_script(
+        world,
+        &move_script,
+        ai_move.from_x,
+        ai_move.from_y,
+        ai_move.to_x,
+        ai_move.to_y,
+        BLACK,
+    ) {
+        Ok(summary) if summary.legal => {
+            state.selected = None;
+            state.winner = summary.winner;
+            state.last_ai_move = Some(ai_move);
+            state.message = if summary.winner == RED {
+                "Red wins".to_string()
+            } else if summary.winner == BLACK {
+                "Black wins".to_string()
+            } else {
+                "Red to move".to_string()
+            };
+        }
+        Ok(_) => {
+            state.selected = None;
+            state.message = "AI selected an illegal move".to_string();
+        }
+        Err(err) => {
+            state.selected = None;
+            state.message = format!("AI move error: {err}");
+        }
+    }
 }
 
 fn publish_move_state(world: &mut World, summary: XiangqiMoveSummary, message: &str) {

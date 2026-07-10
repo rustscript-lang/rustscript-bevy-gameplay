@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     sync::{Arc, Mutex, mpsc::Receiver},
     time::{Duration, Instant},
 };
@@ -16,6 +17,7 @@ pub struct ScriptTab {
     pub host_apis: &'static [&'static str],
     pub diagnostics: Vec<ScriptDiagnostic>,
     pub status: String,
+    pub breakpoints: BTreeSet<u32>,
     edited_at: Option<Instant>,
     applied_at: Option<Instant>,
 }
@@ -36,6 +38,7 @@ impl ScriptTab {
             host_apis,
             diagnostics: Vec::new(),
             status: "Applied".to_string(),
+            breakpoints: BTreeSet::new(),
             edited_at: None,
             applied_at: Some(Instant::now()),
         }
@@ -52,8 +55,10 @@ pub struct LiveScriptEditor {
     pub active: usize,
     pub debug_output: String,
     pub debug_line: Option<u32>,
+    pub debug_tab: Option<usize>,
     pub debug_attached: bool,
     pub debug_starting: bool,
+    pub debug_pending: bool,
     cooldown: Duration,
 }
 
@@ -65,34 +70,59 @@ pub enum EditorAction {
     NextDebug,
     ContinueDebug,
     RefreshLocals,
+    ToggleBreakpoint {
+        tab: usize,
+        line: u32,
+        enabled: bool,
+    },
 }
 
 pub struct DebugSession {
     pub bridge: DebugCommandBridge,
     receiver: Arc<Mutex<Receiver<String>>>,
+    tab: usize,
     source_line_offset: u32,
     seek_user_source: bool,
     temporary_line_breakpoint: Option<u32>,
+    pending_breakpoints: Vec<u32>,
 }
 
 impl DebugSession {
     pub fn new(
         bridge: DebugCommandBridge,
         receiver: Receiver<String>,
+        tab: usize,
         source_line_offset: u32,
+        user_breakpoints: Vec<u32>,
     ) -> Self {
         Self {
             bridge,
             receiver: Arc::new(Mutex::new(receiver)),
+            tab,
             source_line_offset,
             seek_user_source: source_line_offset > 0,
             temporary_line_breakpoint: None,
+            pending_breakpoints: user_breakpoints
+                .into_iter()
+                .map(|line| source_line_offset.saturating_add(line))
+                .collect(),
         }
     }
 
     pub fn poll(&mut self, editor: &mut LiveScriptEditor) {
         let status = self.bridge.status();
         let visible_line = visible_debug_line(status.current_line, self.source_line_offset);
+        if status.attached {
+            let pending_breakpoints = std::mem::take(&mut self.pending_breakpoints);
+            for full_line in pending_breakpoints {
+                if let Err(err) = self.bridge.execute(
+                    format!("break line {full_line}"),
+                    Duration::from_millis(120),
+                ) {
+                    append_debug_output(editor, &format!("{err}\n"));
+                }
+            }
+        }
         if self.seek_user_source && status.attached {
             if visible_line.is_some() {
                 if let Some(target_line) = self.temporary_line_breakpoint {
@@ -135,12 +165,15 @@ impl DebugSession {
         let status = self.bridge.status();
         editor.debug_attached = status.attached;
         editor.debug_line = visible_debug_line(status.current_line, self.source_line_offset);
+        editor.debug_tab = Some(self.tab);
         if status.attached && editor.debug_line.is_some() {
             editor.debug_starting = false;
+            editor.debug_pending = false;
         }
         if let Ok(receiver) = self.receiver.lock() {
             while let Ok(message) = receiver.try_recv() {
                 editor.debug_starting = false;
+                editor.debug_pending = false;
                 append_debug_output(editor, &message);
             }
         }
@@ -153,6 +186,7 @@ impl DebugSession {
                 editor.debug_line =
                     visible_debug_line(response.current_line, self.source_line_offset);
                 editor.debug_starting = response.resumed;
+                editor.debug_pending = false;
                 append_debug_output(editor, &response.output);
             }
             Err(DebugCommandBridgeError::NotAttached) => {
@@ -164,6 +198,27 @@ impl DebugSession {
                 editor.debug_starting = false;
                 append_debug_output(editor, &format!("{err}\n"));
             }
+        }
+    }
+
+    pub fn set_breakpoint(&self, editor: &mut LiveScriptEditor, line: u32, enabled: bool) {
+        let full_line = self.source_line_offset.saturating_add(line);
+        let command = if enabled {
+            format!("break line {full_line}")
+        } else {
+            format!("clear line {full_line}")
+        };
+        match self.bridge.execute(command, Duration::from_millis(120)) {
+            Ok(response) => {
+                editor.debug_attached = response.attached;
+                editor.debug_line =
+                    visible_debug_line(response.current_line, self.source_line_offset);
+                editor.debug_starting = response.resumed;
+                editor.debug_pending = false;
+                append_debug_output(editor, &response.output);
+            }
+            Err(DebugCommandBridgeError::NotAttached) => {}
+            Err(err) => append_debug_output(editor, &format!("{err}\n")),
         }
     }
 }
@@ -201,25 +256,44 @@ impl LiveScriptEditor {
             active: 0,
             debug_output: String::new(),
             debug_line: None,
+            debug_tab: None,
             debug_attached: false,
             debug_starting: false,
+            debug_pending: false,
             cooldown: Duration::from_millis(850),
         }
     }
 
-    pub fn begin_debug_session(&mut self) {
+    pub fn begin_debug_session(&mut self, tab: usize) {
         self.debug_output = "starting debugger...\n".to_string();
         self.debug_line = None;
+        self.debug_tab = Some(tab);
         self.debug_attached = false;
         self.debug_starting = true;
+        self.debug_pending = false;
+    }
+
+    pub fn begin_pending_debug_session(&mut self, tab: usize) {
+        self.debug_output = "waiting for next AI move...\n".to_string();
+        self.debug_line = None;
+        self.debug_tab = Some(tab);
+        self.debug_attached = false;
+        self.debug_starting = false;
+        self.debug_pending = true;
+    }
+
+    pub fn clear_debug_state(&mut self) {
+        self.debug_output.clear();
+        self.debug_line = None;
+        self.debug_tab = None;
+        self.debug_attached = false;
+        self.debug_starting = false;
+        self.debug_pending = false;
     }
 
     pub fn reset_active_tab(&mut self, active: usize) -> EditorAction {
         let _ = self.reset_tab_to_default(active);
-        self.debug_output.clear();
-        self.debug_line = None;
-        self.debug_attached = false;
-        self.debug_starting = false;
+        self.clear_debug_state();
         EditorAction::StopDebug
     }
 
@@ -261,6 +335,14 @@ impl LiveScriptEditor {
         self.set_source(index, source)
     }
 
+    pub fn source_line_offset(&self, index: usize) -> u32 {
+        self.tabs[index].lint_prefix.lines().count() as u32
+    }
+
+    pub fn user_breakpoints(&self, index: usize) -> Vec<u32> {
+        self.tabs[index].breakpoints.iter().copied().collect()
+    }
+
     pub fn update_auto_apply(&mut self, now: Instant) -> Vec<usize> {
         let mut applied = Vec::new();
         for (index, tab) in self.tabs.iter_mut().enumerate() {
@@ -299,12 +381,14 @@ impl LiveScriptEditor {
             }
             let debug_label = if self.debug_starting {
                 "Starting..."
+            } else if self.debug_pending && self.debug_tab == Some(active) {
+                "Armed"
             } else {
                 "Debug"
             };
             if ui
                 .add_enabled(
-                    !self.debug_starting && !self.debug_attached,
+                    !self.debug_starting && !self.debug_attached && !self.debug_pending,
                     egui::Button::new(debug_label),
                 )
                 .clicked()
@@ -312,25 +396,37 @@ impl LiveScriptEditor {
                 actions.push(EditorAction::StartDebug(active));
             }
             if ui
-                .add_enabled(self.debug_attached, egui::Button::new("Step"))
+                .add_enabled(
+                    self.debug_attached && self.debug_tab == Some(active),
+                    egui::Button::new("Step"),
+                )
                 .clicked()
             {
                 actions.push(EditorAction::StepDebug);
             }
             if ui
-                .add_enabled(self.debug_attached, egui::Button::new("Next"))
+                .add_enabled(
+                    self.debug_attached && self.debug_tab == Some(active),
+                    egui::Button::new("Next"),
+                )
                 .clicked()
             {
                 actions.push(EditorAction::NextDebug);
             }
             if ui
-                .add_enabled(self.debug_attached, egui::Button::new("Continue"))
+                .add_enabled(
+                    self.debug_attached && self.debug_tab == Some(active),
+                    egui::Button::new("Continue"),
+                )
                 .clicked()
             {
                 actions.push(EditorAction::ContinueDebug);
             }
             if ui
-                .add_enabled(self.debug_attached, egui::Button::new("Locals"))
+                .add_enabled(
+                    self.debug_attached && self.debug_tab == Some(active),
+                    egui::Button::new("Locals"),
+                )
                 .clicked()
             {
                 actions.push(EditorAction::RefreshLocals);
@@ -355,8 +451,12 @@ impl LiveScriptEditor {
             ui.label(egui::RichText::new(&tab.status).color(status_color(tab)));
             if self.debug_starting {
                 ui.label("debugger starting");
+            } else if self.debug_pending && self.debug_tab == Some(active) {
+                ui.label("debugger armed");
             } else if let Some(line) = self.debug_line {
-                ui.label(format!("debug line {line}"));
+                if self.debug_tab == Some(active) {
+                    ui.label(format!("debug line {line}"));
+                }
             } else if self.debug_attached {
                 ui.label("debugger attached");
             }
@@ -369,27 +469,93 @@ impl LiveScriptEditor {
             190.0
         };
         let remaining_height = ui.available_height().max(panel_height - 140.0);
-        let code_height = (remaining_height - debug_output_height - 18.0).max(320.0);
+        let code_height = (remaining_height - debug_output_height - 18.0).max(260.0);
+        let line_count = tab.buffer.lines().count().max(1);
+        let row_height = ui.text_style_height(&egui::TextStyle::Monospace).max(16.0);
+        let content_height = (line_count as f32 * row_height + 24.0).max(code_height);
+        let gutter_width = 42.0;
+        let text_width = (code_width - gutter_width - 8.0).max(140.0);
+        let active_debug_line = (self.debug_tab == Some(active))
+            .then_some(self.debug_line)
+            .flatten();
         let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
             let mut job = rustscript_layout_job(
                 text.as_str(),
                 &tab.diagnostics,
                 tab.host_apis,
-                self.debug_line,
+                active_debug_line,
             );
-            job.wrap.max_width = wrap_width.min(code_width).max(120.0);
+            job.wrap.max_width = wrap_width.min(text_width).max(120.0);
             ui.fonts_mut(|fonts| fonts.layout_job(job))
         };
-        let response = ui.add_sized(
-            [code_width, code_height],
-            egui::TextEdit::multiline(&mut tab.buffer)
-                .font(egui::TextStyle::Monospace)
-                .desired_width(code_width)
-                .desired_rows(36)
-                .lock_focus(true)
-                .layouter(&mut layouter),
-        );
-        if response.changed() {
+        let mut response_changed = false;
+        egui::ScrollArea::both()
+            .id_salt(("live_rustscript_code", active))
+            .max_height(code_height)
+            .min_scrolled_height(code_height)
+            .min_scrolled_width(text_width)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.set_height(content_height);
+                    ui.vertical(|ui| {
+                        ui.set_width(gutter_width);
+                        ui.add_space(4.0);
+                        for line_index in 1..=line_count {
+                            let line = line_index as u32;
+                            let has_breakpoint = tab.breakpoints.contains(&line);
+                            let text = if has_breakpoint { "●" } else { " " };
+                            let button = egui::Button::new(
+                                egui::RichText::new(text).monospace().size(13.0).color(
+                                    if has_breakpoint {
+                                        egui::Color32::from_rgb(245, 70, 82)
+                                    } else {
+                                        egui::Color32::from_rgb(92, 102, 116)
+                                    },
+                                ),
+                            )
+                            .frame(false)
+                            .min_size(egui::vec2(18.0, row_height));
+                            let line_response = ui
+                                .horizontal(|ui| {
+                                    let clicked = ui.add(button).clicked();
+                                    ui.label(
+                                        egui::RichText::new(format!("{line_index:>2}"))
+                                            .monospace()
+                                            .size(11.0)
+                                            .color(egui::Color32::from_rgb(108, 118, 132)),
+                                    );
+                                    clicked
+                                })
+                                .inner;
+                            if line_response {
+                                let enabled = !has_breakpoint;
+                                if enabled {
+                                    tab.breakpoints.insert(line);
+                                } else {
+                                    tab.breakpoints.remove(&line);
+                                }
+                                actions.push(EditorAction::ToggleBreakpoint {
+                                    tab: active,
+                                    line,
+                                    enabled,
+                                });
+                            }
+                        }
+                    });
+                    let response = ui.add_sized(
+                        [text_width, content_height],
+                        egui::TextEdit::multiline(&mut tab.buffer)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(text_width)
+                            .desired_rows(line_count)
+                            .lock_focus(true)
+                            .layouter(&mut layouter),
+                    );
+                    response_changed = response.changed();
+                });
+            });
+        if response_changed {
             tab.edited_at = Some(Instant::now());
             lint_tab(tab);
             tab.status = if tab.diagnostics.is_empty() {
@@ -811,7 +977,7 @@ fn plain_format(
     source: &str,
 ) -> egui::TextFormat {
     let mut format = egui::TextFormat {
-        font_id: egui::FontId::monospace(13.0),
+        font_id: egui::FontId::monospace(11.0),
         color: egui::Color32::from_rgb(220, 228, 238),
         ..Default::default()
     };
@@ -967,7 +1133,7 @@ mod tests {
         editor.debug_line = Some(8);
         editor.debug_attached = true;
 
-        editor.begin_debug_session();
+        editor.begin_debug_session(0);
 
         assert!(editor.debug_starting);
         assert!(!editor.debug_attached);
@@ -1001,14 +1167,14 @@ mod tests {
             let result = vm.run_with_debugger(&mut debugger);
             let _ = sender.send(format!("{result:?}"));
         });
-        let mut session = DebugSession::new(bridge, receiver, 1);
+        let mut session = DebugSession::new(bridge, receiver, 0, 1, Vec::new());
         let mut editor = LiveScriptEditor::new(vec![ScriptTab::new(
             "move.rss",
             "let shown: int = hidden + 1;\n",
             "let hidden: int = 0;\n",
             HOSTS,
         )]);
-        editor.begin_debug_session();
+        editor.begin_debug_session(0);
 
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
@@ -1034,11 +1200,15 @@ mod tests {
         let bridge = DebugCommandBridge::new();
         let thread_bridge = bridge.clone();
         let (_sender, receiver) = mpsc::channel();
-        let session = DebugSession::new(bridge, receiver, 0);
-
-        drop(session);
-
         let (done_sender, done_receiver) = mpsc::channel();
+        let mut session = DebugSession::new(bridge, receiver, 0, 0, Vec::new());
+        let mut editor = LiveScriptEditor::new(vec![ScriptTab::new(
+            "move.rss",
+            "let value: int = 1;\n",
+            "",
+            HOSTS,
+        )]);
+        editor.begin_debug_session(0);
         thread::spawn(move || {
             let mut debugger = Debugger::with_command_bridge(thread_bridge);
             debugger.stop_on_entry();
@@ -1046,6 +1216,18 @@ mod tests {
             let _ = vm.run_with_debugger(&mut debugger);
             let _ = done_sender.send(());
         });
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            session.poll(&mut editor);
+            if editor.debug_attached {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(editor.debug_attached);
+
+        drop(session);
 
         assert!(done_receiver.recv_timeout(Duration::from_secs(1)).is_ok());
     }
