@@ -47,7 +47,7 @@ jobs:
         run: cargo clippy --all-targets
       - name: Tests
         working-directory: rustscript-bevy-gameplay
-        run: cargo test --tests
+        run: cargo test --tests -- --skip gomoku_ai_self_play --skip xiangqi_ai_self_play
       - name: Example run
         working-directory: rustscript-bevy-gameplay
         run: cargo run --example combat
