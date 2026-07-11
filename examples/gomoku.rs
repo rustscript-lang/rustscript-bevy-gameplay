@@ -79,6 +79,20 @@ impl Default for GomokuUiState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GomokuHistorySnapshot {
+    cells: Vec<i64>,
+    current_player: i64,
+    winner: i64,
+    draw: bool,
+}
+
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
+struct GomokuHistory {
+    undo: Vec<GomokuHistorySnapshot>,
+    redo: Vec<GomokuHistorySnapshot>,
+}
+
 #[derive(Resource)]
 struct GomokuScripts {
     editor: LiveScriptEditor,
@@ -189,6 +203,7 @@ fn setup(world: &mut World) {
     ));
     reset_gomoku_board(world);
     world.insert_resource(GomokuUiState::default());
+    world.insert_resource(GomokuHistory::default());
     world.insert_resource(GomokuScripts::default());
 }
 
@@ -243,6 +258,7 @@ fn run_script_smoke() {
 
 fn gomoku_ui(world: &mut World) {
     let board = world.resource::<GomokuBoard>().clone();
+    let history = world.resource::<GomokuHistory>().clone();
     let mut state = world.resource::<GomokuUiState>().clone();
     let mut scripts = world.remove_resource::<GomokuScripts>().unwrap_or_default();
     scripts.editor.update_auto_apply(std::time::Instant::now());
@@ -252,6 +268,8 @@ fn gomoku_ui(world: &mut World) {
     poll_gomoku_ai_debug_result(world, &mut scripts, &mut state);
     let mut clicked_move = None;
     let mut restart = false;
+    let mut undo = false;
+    let mut redo = false;
     let mut pending_import = None;
     let mut editor_actions = Vec::new();
 
@@ -308,8 +326,21 @@ fn gomoku_ui(world: &mut World) {
                             if ui.button("Restart").clicked() {
                                 restart = true;
                             }
+                            if ui
+                                .add_enabled(!history.undo.is_empty(), egui::Button::new("Undo"))
+                                .clicked()
+                            {
+                                undo = true;
+                            }
+                            if ui
+                                .add_enabled(!history.redo.is_empty(), egui::Button::new("Redo"))
+                                .clicked()
+                            {
+                                redo = true;
+                            }
                             if ui.button("Save").clicked() {
-                                let contents = export_gomoku_save(&board, &scripts.editor);
+                                let contents =
+                                    export_gomoku_save(&board, &state, &history, &scripts.editor);
                                 state.board_io_status = match board_save::save_board_file(
                                     "Save Gomoku game",
                                     "gomoku.rssboard",
@@ -407,12 +438,9 @@ fn gomoku_ui(world: &mut World) {
     if let Some((path, text)) = pending_import {
         clicked_move = None;
         match import_gomoku_save(world, &mut scripts, &text) {
-            Ok(()) => {
-                state.message = "Imported board and scripts".to_string();
-                state.current_player = HUMAN;
+            Ok(snapshot) => {
+                apply_gomoku_snapshot_to_state(&mut state, &snapshot);
                 state.last_ai_takeover_move_at = None;
-                state.winner = 0;
-                state.draw = false;
                 state.last_ai_move = None;
                 state.board_io_status = format!("Loaded {}", board_save::display_file_name(&path));
             }
@@ -425,12 +453,21 @@ fn gomoku_ui(world: &mut World) {
     if restart {
         reset_gomoku_board(world);
         world.insert_resource(GomokuUiState::default());
+        world.insert_resource(GomokuHistory::default());
         world.insert_resource(scripts);
         return;
     }
 
     world.insert_resource(state);
     world.insert_resource(scripts);
+    if undo {
+        undo_gomoku_turn(world);
+        return;
+    }
+    if redo {
+        redo_gomoku_turn(world);
+        return;
+    }
     if let Some((x, y)) = clicked_move {
         play_human_turn(world, x, y);
     }
@@ -535,14 +572,33 @@ fn pointer_to_cell(rect: egui::Rect, step: f32, position: egui::Pos2) -> Option<
     }
 }
 
-fn export_gomoku_save(board: &GomokuBoard, editor: &LiveScriptEditor) -> String {
-    board_save::encode_board_save(
+fn export_gomoku_save(
+    board: &GomokuBoard,
+    state: &GomokuUiState,
+    history: &GomokuHistory,
+    editor: &LiveScriptEditor,
+) -> String {
+    let current = encode_gomoku_snapshot(&gomoku_snapshot(board, state));
+    let undo_history = history
+        .undo
+        .iter()
+        .map(encode_gomoku_snapshot)
+        .collect::<Vec<_>>();
+    let redo_history = history
+        .redo
+        .iter()
+        .map(encode_gomoku_snapshot)
+        .collect::<Vec<_>>();
+    board_save::encode_board_save_with_history(
         "gomoku",
         board.cells(),
         &[
             ("move.rss", editor.active_source(MOVE_TAB)),
             ("ai.rss", editor.active_source(AI_TAB)),
         ],
+        Some(&current),
+        &undo_history,
+        &redo_history,
     )
 }
 
@@ -550,15 +606,25 @@ fn import_gomoku_save(
     world: &mut World,
     scripts: &mut GomokuScripts,
     text: &str,
-) -> Result<(), String> {
+) -> Result<GomokuHistorySnapshot, String> {
     let package = board_save::decode_board_save(
         text,
         "gomoku",
         (GOMOKU_BOARD_SIZE * GOMOKU_BOARD_SIZE) as usize,
         SCRIPT_TITLES,
     )?;
+    let current = if let Some(state) = package.state.as_deref() {
+        decode_gomoku_snapshot(state)?
+    } else {
+        GomokuHistorySnapshot {
+            cells: package.cells.clone(),
+            current_player: HUMAN,
+            winner: 0,
+            draw: false,
+        }
+    };
     let mut board = GomokuBoard::default();
-    board.replace_cells(package.cells)?;
+    board.replace_cells(current.cells.clone())?;
     for script in package.scripts {
         match script.title.as_str() {
             "move.rss" => scripts.editor.set_source(MOVE_TAB, script.source)?,
@@ -566,8 +632,195 @@ fn import_gomoku_save(
             _ => {}
         }
     }
+    let undo = package
+        .undo_history
+        .iter()
+        .map(|entry| decode_gomoku_snapshot(entry))
+        .collect::<Result<Vec<_>, _>>()?;
+    let redo = package
+        .redo_history
+        .iter()
+        .map(|entry| decode_gomoku_snapshot(entry))
+        .collect::<Result<Vec<_>, _>>()?;
     world.insert_resource(board);
+    world.insert_resource(GomokuHistory { undo, redo });
+    Ok(current)
+}
+
+fn gomoku_snapshot(board: &GomokuBoard, state: &GomokuUiState) -> GomokuHistorySnapshot {
+    GomokuHistorySnapshot {
+        cells: board.cells().to_vec(),
+        current_player: state.current_player,
+        winner: state.winner,
+        draw: state.draw,
+    }
+}
+
+fn current_gomoku_snapshot(world: &World) -> GomokuHistorySnapshot {
+    gomoku_snapshot(
+        world.resource::<GomokuBoard>(),
+        world.resource::<GomokuUiState>(),
+    )
+}
+
+fn encode_gomoku_snapshot(snapshot: &GomokuHistorySnapshot) -> String {
+    format!(
+        "current={};winner={};draw={};cells={}",
+        snapshot.current_player,
+        snapshot.winner,
+        if snapshot.draw { 1 } else { 0 },
+        snapshot
+            .cells
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn decode_gomoku_snapshot(text: &str) -> Result<GomokuHistorySnapshot, String> {
+    let mut current_player = None;
+    let mut winner = None;
+    let mut draw = None;
+    let mut cells = None;
+    for part in text.split(';') {
+        let Some((key, value)) = part.split_once('=') else {
+            return Err(format!("invalid gomoku history field: {part}"));
+        };
+        match key {
+            "current" => {
+                current_player = Some(
+                    value
+                        .parse::<i64>()
+                        .map_err(|_| format!("invalid gomoku current player: {value}"))?,
+                );
+            }
+            "winner" => {
+                winner = Some(
+                    value
+                        .parse::<i64>()
+                        .map_err(|_| format!("invalid gomoku winner: {value}"))?,
+                );
+            }
+            "draw" => {
+                draw = Some(match value {
+                    "0" => false,
+                    "1" => true,
+                    _ => return Err(format!("invalid gomoku draw value: {value}")),
+                });
+            }
+            "cells" => {
+                cells = Some(parse_gomoku_cells(value)?);
+            }
+            _ => return Err(format!("unknown gomoku history field: {key}")),
+        }
+    }
+    Ok(GomokuHistorySnapshot {
+        cells: cells.ok_or_else(|| "gomoku history is missing cells".to_string())?,
+        current_player: current_player
+            .ok_or_else(|| "gomoku history is missing current player".to_string())?,
+        winner: winner.ok_or_else(|| "gomoku history is missing winner".to_string())?,
+        draw: draw.ok_or_else(|| "gomoku history is missing draw".to_string())?,
+    })
+}
+
+fn parse_gomoku_cells(value: &str) -> Result<Vec<i64>, String> {
+    let cells = value
+        .split(',')
+        .map(|cell| {
+            cell.parse::<i64>()
+                .map_err(|_| format!("invalid gomoku cell value: {cell}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected = (GOMOKU_BOARD_SIZE * GOMOKU_BOARD_SIZE) as usize;
+    if cells.len() != expected {
+        return Err(format!(
+            "gomoku history has {} cells; expected {expected}",
+            cells.len()
+        ));
+    }
+    Ok(cells)
+}
+
+fn apply_gomoku_snapshot_to_state(state: &mut GomokuUiState, snapshot: &GomokuHistorySnapshot) {
+    state.current_player = snapshot.current_player;
+    state.winner = snapshot.winner;
+    state.draw = snapshot.draw;
+    state.last_ai_move = None;
+    state.message = gomoku_snapshot_message(state);
+}
+
+fn restore_gomoku_snapshot(
+    world: &mut World,
+    snapshot: &GomokuHistorySnapshot,
+) -> Result<(), String> {
+    let mut board = GomokuBoard::default();
+    board.replace_cells(snapshot.cells.clone())?;
+    world.insert_resource(board);
+    let mut state = world.resource_mut::<GomokuUiState>();
+    apply_gomoku_snapshot_to_state(&mut state, snapshot);
+    state.last_ai_takeover_move_at = None;
     Ok(())
+}
+
+fn gomoku_snapshot_message(state: &GomokuUiState) -> String {
+    if state.winner == HUMAN {
+        "Black wins".to_string()
+    } else if state.winner == COMPUTER {
+        "White wins".to_string()
+    } else if state.draw {
+        "Draw".to_string()
+    } else if gomoku_ai_takeover_enabled(state) {
+        format!("{} AI to move", gomoku_player_label(state.current_player))
+    } else if state.current_player == HUMAN {
+        "Your turn".to_string()
+    } else {
+        "AI thinking".to_string()
+    }
+}
+
+fn push_gomoku_undo_snapshot(world: &mut World, snapshot: GomokuHistorySnapshot) {
+    let mut history = world.resource_mut::<GomokuHistory>();
+    history.undo.push(snapshot);
+    history.redo.clear();
+}
+
+fn undo_gomoku_turn(world: &mut World) {
+    let current = current_gomoku_snapshot(world);
+    let previous = {
+        let mut history = world.resource_mut::<GomokuHistory>();
+        let previous = history.undo.pop();
+        if previous.is_some() {
+            history.redo.push(current);
+        }
+        previous
+    };
+    if let Some(previous) = previous {
+        if let Err(err) = restore_gomoku_snapshot(world, &previous) {
+            world.resource_mut::<GomokuUiState>().board_io_status = format!("Undo error: {err}");
+        } else {
+            world.resource_mut::<GomokuUiState>().board_io_status = "Undo".to_string();
+        }
+    }
+}
+
+fn redo_gomoku_turn(world: &mut World) {
+    let current = current_gomoku_snapshot(world);
+    let next = {
+        let mut history = world.resource_mut::<GomokuHistory>();
+        let next = history.redo.pop();
+        if next.is_some() {
+            history.undo.push(current);
+        }
+        next
+    };
+    if let Some(next) = next {
+        if let Err(err) = restore_gomoku_snapshot(world, &next) {
+            world.resource_mut::<GomokuUiState>().board_io_status = format!("Redo error: {err}");
+        } else {
+            world.resource_mut::<GomokuUiState>().board_io_status = "Redo".to_string();
+        }
+    }
 }
 
 fn play_human_turn(world: &mut World, x: i64, y: i64) {
@@ -584,6 +837,7 @@ fn play_human_turn(world: &mut World, x: i64, y: i64) {
         .editor
         .active_source(MOVE_TAB)
         .to_string();
+    let before_turn = current_gomoku_snapshot(world);
 
     let human = match apply_gomoku_move_script(world, &move_script, x, y, HUMAN) {
         Ok(summary) => summary,
@@ -596,6 +850,7 @@ fn play_human_turn(world: &mut World, x: i64, y: i64) {
         world.resource_mut::<GomokuUiState>().message = "Point unavailable".to_string();
         return;
     }
+    push_gomoku_undo_snapshot(world, before_turn);
     publish_move_state(world, human, "AI thinking", None);
     if human.winner == 0 && !human.draw {
         world.resource_mut::<GomokuUiState>().current_player = COMPUTER;
@@ -636,7 +891,10 @@ fn maybe_run_gomoku_ai_turn_at(world: &mut World, now: Instant) {
 }
 
 fn play_gomoku_ai_turn(world: &mut World, player: i64) {
-    let ai_bias = world.resource::<GomokuUiState>().ai_bias;
+    let state = world.resource::<GomokuUiState>().clone();
+    let ai_bias = state.ai_bias;
+    let takeover_enabled = gomoku_ai_takeover_enabled(&state);
+    let before_turn = takeover_enabled.then(|| current_gomoku_snapshot(world));
     let (move_script, ai_script) = {
         let scripts = world.resource::<GomokuScripts>();
         (
@@ -673,6 +931,9 @@ fn play_gomoku_ai_turn(world: &mut World, player: i64) {
         world.resource_mut::<GomokuUiState>().message =
             "AI selected an unavailable point".to_string();
         return;
+    }
+    if let Some(snapshot) = before_turn {
+        push_gomoku_undo_snapshot(world, snapshot);
     }
     let message = if gomoku_ai_takeover_enabled(world.resource::<GomokuUiState>()) {
         format!("{} AI moved", gomoku_player_label(player))
@@ -885,8 +1146,13 @@ fn poll_gomoku_ai_debug_result(
     state.last_ai_move_micros = Some(ai_move.telemetry.elapsed_micros);
 
     let move_script = scripts.editor.active_source(MOVE_TAB).to_string();
+    let before_turn = gomoku_ai_takeover_enabled(state)
+        .then(|| gomoku_snapshot(world.resource::<GomokuBoard>(), state));
     match apply_gomoku_move_script(world, &move_script, ai_move.x, ai_move.y, player) {
         Ok(summary) if summary.legal => {
+            if let Some(snapshot) = before_turn {
+                push_gomoku_undo_snapshot(world, snapshot);
+            }
             state.winner = summary.winner;
             state.draw = summary.draw;
             state.last_ai_move = Some(ai_move);
@@ -1039,6 +1305,19 @@ mod tests {
         let mut board = GomokuBoard::default();
         board.set_for_test(7, 7, HUMAN);
         world.insert_resource(board.clone());
+        let mut state = GomokuUiState::default();
+        state.current_player = COMPUTER;
+        world.insert_resource(state.clone());
+        let history = GomokuHistory {
+            undo: vec![GomokuHistorySnapshot {
+                cells: vec![0; (GOMOKU_BOARD_SIZE * GOMOKU_BOARD_SIZE) as usize],
+                current_player: HUMAN,
+                winner: 0,
+                draw: false,
+            }],
+            redo: vec![],
+        };
+        world.insert_resource(history.clone());
         let mut scripts = GomokuScripts::default();
         let move_source = format!("{MOVE_SCRIPT}\nlet save_marker: int = 1;\n");
         let ai_source = format!("{AI_SCRIPT}\nlet save_marker: int = 2;\n");
@@ -1051,11 +1330,13 @@ mod tests {
             .set_source(AI_TAB, ai_source.clone())
             .unwrap();
 
-        let text = export_gomoku_save(&board, &scripts.editor);
+        let text = export_gomoku_save(&board, &state, &history, &scripts.editor);
         let mut loaded_scripts = GomokuScripts::default();
-        import_gomoku_save(&mut world, &mut loaded_scripts, &text).unwrap();
+        let loaded_state = import_gomoku_save(&mut world, &mut loaded_scripts, &text).unwrap();
 
         assert_eq!(world.resource::<GomokuBoard>().cell(7, 7), HUMAN);
+        assert_eq!(loaded_state.current_player, COMPUTER);
+        assert_eq!(world.resource::<GomokuHistory>().undo.len(), 1);
         assert_eq!(loaded_scripts.editor.active_source(MOVE_TAB), move_source);
         assert_eq!(loaded_scripts.editor.active_source(AI_TAB), ai_source);
     }
@@ -1110,10 +1391,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gomoku_undo_and_redo_restore_player_turn_boundaries() {
+        let mut world = fast_gomoku_world();
+
+        play_human_turn(&mut world, 7, 7);
+        maybe_run_gomoku_ai_turn_at(&mut world, Instant::now());
+
+        assert_eq!(world.resource::<GomokuBoard>().cell(7, 7), HUMAN);
+        assert_eq!(world.resource::<GomokuBoard>().cell(8, 7), COMPUTER);
+        assert_eq!(world.resource::<GomokuUiState>().current_player, HUMAN);
+
+        undo_gomoku_turn(&mut world);
+        assert_eq!(world.resource::<GomokuBoard>().cell(7, 7), 0);
+        assert_eq!(world.resource::<GomokuBoard>().cell(8, 7), 0);
+        assert_eq!(world.resource::<GomokuUiState>().current_player, HUMAN);
+
+        redo_gomoku_turn(&mut world);
+        assert_eq!(world.resource::<GomokuBoard>().cell(7, 7), HUMAN);
+        assert_eq!(world.resource::<GomokuBoard>().cell(8, 7), COMPUTER);
+        assert_eq!(world.resource::<GomokuUiState>().current_player, HUMAN);
+    }
+
     fn fast_gomoku_world() -> World {
         let mut world = World::new();
         world.insert_resource(GomokuBoard::default());
         world.insert_resource(GomokuUiState::default());
+        world.insert_resource(GomokuHistory::default());
         let mut scripts = GomokuScripts::default();
         scripts
             .editor

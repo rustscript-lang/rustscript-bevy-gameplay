@@ -80,6 +80,19 @@ impl Default for XiangqiUiState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct XiangqiHistorySnapshot {
+    cells: Vec<i64>,
+    current_player: i64,
+    winner: i64,
+}
+
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
+struct XiangqiHistory {
+    undo: Vec<XiangqiHistorySnapshot>,
+    redo: Vec<XiangqiHistorySnapshot>,
+}
+
 #[derive(Resource)]
 struct XiangqiScripts {
     editor: LiveScriptEditor,
@@ -190,6 +203,7 @@ fn setup(world: &mut World) {
     ));
     reset_xiangqi_board(world);
     world.insert_resource(XiangqiUiState::default());
+    world.insert_resource(XiangqiHistory::default());
     world.insert_resource(XiangqiScripts::default());
 }
 
@@ -248,6 +262,7 @@ fn run_script_smoke() {
 
 fn xiangqi_ui(world: &mut World) {
     let board = world.resource::<XiangqiBoard>().clone();
+    let history = world.resource::<XiangqiHistory>().clone();
     let mut state = world.resource::<XiangqiUiState>().clone();
     let mut scripts = world
         .remove_resource::<XiangqiScripts>()
@@ -259,6 +274,8 @@ fn xiangqi_ui(world: &mut World) {
     poll_xiangqi_ai_debug_result(world, &mut scripts, &mut state);
     let mut clicked = None;
     let mut restart = false;
+    let mut undo = false;
+    let mut redo = false;
     let mut pending_import = None;
     let mut installed_fonts = false;
     let mut editor_actions = Vec::new();
@@ -320,8 +337,21 @@ fn xiangqi_ui(world: &mut World) {
                             if ui.button("Restart").clicked() {
                                 restart = true;
                             }
+                            if ui
+                                .add_enabled(!history.undo.is_empty(), egui::Button::new("Undo"))
+                                .clicked()
+                            {
+                                undo = true;
+                            }
+                            if ui
+                                .add_enabled(!history.redo.is_empty(), egui::Button::new("Redo"))
+                                .clicked()
+                            {
+                                redo = true;
+                            }
                             if ui.button("Save").clicked() {
-                                let contents = export_xiangqi_save(&board, &scripts.editor);
+                                let contents =
+                                    export_xiangqi_save(&board, &state, &history, &scripts.editor);
                                 state.board_io_status = match board_save::save_board_file(
                                     "Save Xiangqi game",
                                     "xiangqi.rssboard",
@@ -421,12 +451,9 @@ fn xiangqi_ui(world: &mut World) {
     if let Some((path, text)) = pending_import {
         clicked = None;
         match import_xiangqi_save(world, &mut scripts, &text) {
-            Ok(()) => {
-                state.message = "Imported board and scripts".to_string();
-                state.selected = None;
-                state.current_player = RED;
+            Ok(snapshot) => {
+                apply_xiangqi_snapshot_to_state(&mut state, &snapshot);
                 state.last_ai_takeover_move_at = None;
-                state.winner = 0;
                 state.last_ai_move = None;
                 state.board_io_status = format!("Loaded {}", board_save::display_file_name(&path));
             }
@@ -439,12 +466,21 @@ fn xiangqi_ui(world: &mut World) {
     if restart {
         reset_xiangqi_board(world);
         world.insert_resource(XiangqiUiState::default());
+        world.insert_resource(XiangqiHistory::default());
         world.insert_resource(scripts);
         return;
     }
 
     world.insert_resource(state);
     world.insert_resource(scripts);
+    if undo {
+        undo_xiangqi_turn(world);
+        return;
+    }
+    if redo {
+        redo_xiangqi_turn(world);
+        return;
+    }
     if let Some((x, y)) = clicked {
         handle_click(world, x, y);
     }
@@ -633,14 +669,33 @@ fn pointer_to_cell(
     }
 }
 
-fn export_xiangqi_save(board: &XiangqiBoard, editor: &LiveScriptEditor) -> String {
-    board_save::encode_board_save(
+fn export_xiangqi_save(
+    board: &XiangqiBoard,
+    state: &XiangqiUiState,
+    history: &XiangqiHistory,
+    editor: &LiveScriptEditor,
+) -> String {
+    let current = encode_xiangqi_snapshot(&xiangqi_snapshot(board, state));
+    let undo_history = history
+        .undo
+        .iter()
+        .map(encode_xiangqi_snapshot)
+        .collect::<Vec<_>>();
+    let redo_history = history
+        .redo
+        .iter()
+        .map(encode_xiangqi_snapshot)
+        .collect::<Vec<_>>();
+    board_save::encode_board_save_with_history(
         "xiangqi",
         board.cells(),
         &[
             ("move.rss", editor.active_source(MOVE_TAB)),
             ("ai.rss", editor.active_source(AI_TAB)),
         ],
+        Some(&current),
+        &undo_history,
+        &redo_history,
     )
 }
 
@@ -648,15 +703,24 @@ fn import_xiangqi_save(
     world: &mut World,
     scripts: &mut XiangqiScripts,
     text: &str,
-) -> Result<(), String> {
+) -> Result<XiangqiHistorySnapshot, String> {
     let package = board_save::decode_board_save(
         text,
         "xiangqi",
         (XIANGQI_BOARD_WIDTH * XIANGQI_BOARD_HEIGHT) as usize,
         SCRIPT_TITLES,
     )?;
+    let current = if let Some(state) = package.state.as_deref() {
+        decode_xiangqi_snapshot(state)?
+    } else {
+        XiangqiHistorySnapshot {
+            cells: package.cells.clone(),
+            current_player: RED,
+            winner: 0,
+        }
+    };
     let mut board = XiangqiBoard::default();
-    board.replace_cells(package.cells)?;
+    board.replace_cells(current.cells.clone())?;
     for script in package.scripts {
         match script.title.as_str() {
             "move.rss" => scripts.editor.set_source(MOVE_TAB, script.source)?,
@@ -664,8 +728,182 @@ fn import_xiangqi_save(
             _ => {}
         }
     }
+    let undo = package
+        .undo_history
+        .iter()
+        .map(|entry| decode_xiangqi_snapshot(entry))
+        .collect::<Result<Vec<_>, _>>()?;
+    let redo = package
+        .redo_history
+        .iter()
+        .map(|entry| decode_xiangqi_snapshot(entry))
+        .collect::<Result<Vec<_>, _>>()?;
     world.insert_resource(board);
+    world.insert_resource(XiangqiHistory { undo, redo });
+    Ok(current)
+}
+
+fn xiangqi_snapshot(board: &XiangqiBoard, state: &XiangqiUiState) -> XiangqiHistorySnapshot {
+    XiangqiHistorySnapshot {
+        cells: board.cells().to_vec(),
+        current_player: state.current_player,
+        winner: state.winner,
+    }
+}
+
+fn current_xiangqi_snapshot(world: &World) -> XiangqiHistorySnapshot {
+    xiangqi_snapshot(
+        world.resource::<XiangqiBoard>(),
+        world.resource::<XiangqiUiState>(),
+    )
+}
+
+fn encode_xiangqi_snapshot(snapshot: &XiangqiHistorySnapshot) -> String {
+    format!(
+        "current={};winner={};cells={}",
+        snapshot.current_player,
+        snapshot.winner,
+        snapshot
+            .cells
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn decode_xiangqi_snapshot(text: &str) -> Result<XiangqiHistorySnapshot, String> {
+    let mut current_player = None;
+    let mut winner = None;
+    let mut cells = None;
+    for part in text.split(';') {
+        let Some((key, value)) = part.split_once('=') else {
+            return Err(format!("invalid xiangqi history field: {part}"));
+        };
+        match key {
+            "current" => {
+                current_player = Some(
+                    value
+                        .parse::<i64>()
+                        .map_err(|_| format!("invalid xiangqi current player: {value}"))?,
+                );
+            }
+            "winner" => {
+                winner = Some(
+                    value
+                        .parse::<i64>()
+                        .map_err(|_| format!("invalid xiangqi winner: {value}"))?,
+                );
+            }
+            "cells" => {
+                cells = Some(parse_xiangqi_cells(value)?);
+            }
+            _ => return Err(format!("unknown xiangqi history field: {key}")),
+        }
+    }
+    Ok(XiangqiHistorySnapshot {
+        cells: cells.ok_or_else(|| "xiangqi history is missing cells".to_string())?,
+        current_player: current_player
+            .ok_or_else(|| "xiangqi history is missing current player".to_string())?,
+        winner: winner.ok_or_else(|| "xiangqi history is missing winner".to_string())?,
+    })
+}
+
+fn parse_xiangqi_cells(value: &str) -> Result<Vec<i64>, String> {
+    let cells = value
+        .split(',')
+        .map(|cell| {
+            cell.parse::<i64>()
+                .map_err(|_| format!("invalid xiangqi cell value: {cell}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected = (XIANGQI_BOARD_WIDTH * XIANGQI_BOARD_HEIGHT) as usize;
+    if cells.len() != expected {
+        return Err(format!(
+            "xiangqi history has {} cells; expected {expected}",
+            cells.len()
+        ));
+    }
+    Ok(cells)
+}
+
+fn apply_xiangqi_snapshot_to_state(state: &mut XiangqiUiState, snapshot: &XiangqiHistorySnapshot) {
+    state.selected = None;
+    state.current_player = snapshot.current_player;
+    state.winner = snapshot.winner;
+    state.last_ai_move = None;
+    state.message = xiangqi_snapshot_message(state);
+}
+
+fn restore_xiangqi_snapshot(
+    world: &mut World,
+    snapshot: &XiangqiHistorySnapshot,
+) -> Result<(), String> {
+    let mut board = XiangqiBoard::default();
+    board.replace_cells(snapshot.cells.clone())?;
+    world.insert_resource(board);
+    let mut state = world.resource_mut::<XiangqiUiState>();
+    apply_xiangqi_snapshot_to_state(&mut state, snapshot);
+    state.last_ai_takeover_move_at = None;
     Ok(())
+}
+
+fn xiangqi_snapshot_message(state: &XiangqiUiState) -> String {
+    if state.winner == RED {
+        "Red wins".to_string()
+    } else if state.winner == BLACK {
+        "Black wins".to_string()
+    } else if xiangqi_ai_takeover_enabled(state) {
+        format!("{} AI to move", xiangqi_player_label(state.current_player))
+    } else if state.current_player == RED {
+        "Red to move".to_string()
+    } else {
+        "AI thinking".to_string()
+    }
+}
+
+fn push_xiangqi_undo_snapshot(world: &mut World, snapshot: XiangqiHistorySnapshot) {
+    let mut history = world.resource_mut::<XiangqiHistory>();
+    history.undo.push(snapshot);
+    history.redo.clear();
+}
+
+fn undo_xiangqi_turn(world: &mut World) {
+    let current = current_xiangqi_snapshot(world);
+    let previous = {
+        let mut history = world.resource_mut::<XiangqiHistory>();
+        let previous = history.undo.pop();
+        if previous.is_some() {
+            history.redo.push(current);
+        }
+        previous
+    };
+    if let Some(previous) = previous {
+        if let Err(err) = restore_xiangqi_snapshot(world, &previous) {
+            world.resource_mut::<XiangqiUiState>().board_io_status = format!("Undo error: {err}");
+        } else {
+            world.resource_mut::<XiangqiUiState>().board_io_status = "Undo".to_string();
+        }
+    }
+}
+
+fn redo_xiangqi_turn(world: &mut World) {
+    let current = current_xiangqi_snapshot(world);
+    let next = {
+        let mut history = world.resource_mut::<XiangqiHistory>();
+        let next = history.redo.pop();
+        if next.is_some() {
+            history.undo.push(current);
+        }
+        next
+    };
+    if let Some(next) = next {
+        if let Err(err) = restore_xiangqi_snapshot(world, &next) {
+            world.resource_mut::<XiangqiUiState>().board_io_status = format!("Redo error: {err}");
+        } else {
+            world.resource_mut::<XiangqiUiState>().board_io_status = "Redo".to_string();
+        }
+    }
 }
 
 fn handle_click(world: &mut World, x: i64, y: i64) {
@@ -699,6 +937,7 @@ fn play_human_turn(world: &mut World, from_x: i64, from_y: i64, to_x: i64, to_y:
         .editor
         .active_source(MOVE_TAB)
         .to_string();
+    let before_turn = current_xiangqi_snapshot(world);
     let human =
         match apply_xiangqi_move_script(world, &move_script, from_x, from_y, to_x, to_y, RED) {
             Ok(summary) => summary,
@@ -714,6 +953,7 @@ fn play_human_turn(world: &mut World, from_x: i64, from_y: i64, to_x: i64, to_y:
         state.selected = None;
         return;
     }
+    push_xiangqi_undo_snapshot(world, before_turn);
     publish_move_state(world, human, "AI thinking");
     if human.winner != 0 {
         return;
@@ -755,7 +995,10 @@ fn maybe_run_xiangqi_ai_turn_at(world: &mut World, now: Instant) {
 }
 
 fn play_xiangqi_ai_turn(world: &mut World, player: i64) {
-    let ai_bias = world.resource::<XiangqiUiState>().ai_bias;
+    let state = world.resource::<XiangqiUiState>().clone();
+    let ai_bias = state.ai_bias;
+    let takeover_enabled = xiangqi_ai_takeover_enabled(&state);
+    let before_turn = takeover_enabled.then(|| current_xiangqi_snapshot(world));
     let (move_script, ai_script) = {
         let scripts = world.resource::<XiangqiScripts>();
         (
@@ -810,6 +1053,9 @@ fn play_xiangqi_ai_turn(world: &mut World, player: i64) {
         state.message = "AI selected an illegal move".to_string();
         state.selected = None;
         return;
+    }
+    if let Some(snapshot) = before_turn {
+        push_xiangqi_undo_snapshot(world, snapshot);
     }
     world.resource_mut::<XiangqiUiState>().last_ai_move = Some(ai_move);
     let message = if xiangqi_ai_takeover_enabled(world.resource::<XiangqiUiState>()) {
@@ -1027,6 +1273,8 @@ fn poll_xiangqi_ai_debug_result(
     state.last_ai_move_micros = Some(ai_move.telemetry.elapsed_micros);
 
     let move_script = scripts.editor.active_source(MOVE_TAB).to_string();
+    let before_turn = xiangqi_ai_takeover_enabled(state)
+        .then(|| xiangqi_snapshot(world.resource::<XiangqiBoard>(), state));
     match apply_xiangqi_move_script(
         world,
         &move_script,
@@ -1037,6 +1285,9 @@ fn poll_xiangqi_ai_debug_result(
         player,
     ) {
         Ok(summary) if summary.legal => {
+            if let Some(snapshot) = before_turn {
+                push_xiangqi_undo_snapshot(world, snapshot);
+            }
             state.selected = None;
             state.winner = summary.winner;
             state.last_ai_move = Some(ai_move);
@@ -1254,6 +1505,18 @@ mod tests {
         board.clear_for_test();
         board.set_for_test(4, 9, RED);
         world.insert_resource(board.clone());
+        let mut state = XiangqiUiState::default();
+        state.current_player = BLACK;
+        world.insert_resource(state.clone());
+        let history = XiangqiHistory {
+            undo: vec![XiangqiHistorySnapshot {
+                cells: board.cells().to_vec(),
+                current_player: RED,
+                winner: 0,
+            }],
+            redo: vec![],
+        };
+        world.insert_resource(history.clone());
         let mut scripts = XiangqiScripts::default();
         let move_source = format!("{MOVE_SCRIPT}\nlet save_marker: int = 1;\n");
         let ai_source = format!("{AI_SCRIPT}\nlet save_marker: int = 2;\n");
@@ -1266,11 +1529,13 @@ mod tests {
             .set_source(AI_TAB, ai_source.clone())
             .unwrap();
 
-        let text = export_xiangqi_save(&board, &scripts.editor);
+        let text = export_xiangqi_save(&board, &state, &history, &scripts.editor);
         let mut loaded_scripts = XiangqiScripts::default();
-        import_xiangqi_save(&mut world, &mut loaded_scripts, &text).unwrap();
+        let loaded_state = import_xiangqi_save(&mut world, &mut loaded_scripts, &text).unwrap();
 
         assert_eq!(world.resource::<XiangqiBoard>().cell(4, 9), RED);
+        assert_eq!(loaded_state.current_player, BLACK);
+        assert_eq!(world.resource::<XiangqiHistory>().undo.len(), 1);
         assert_eq!(loaded_scripts.editor.active_source(MOVE_TAB), move_source);
         assert_eq!(loaded_scripts.editor.active_source(AI_TAB), ai_source);
     }
@@ -1325,10 +1590,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn xiangqi_undo_and_redo_restore_player_turn_boundaries() {
+        let mut world = fast_xiangqi_world();
+
+        play_human_turn(&mut world, 4, 6, 4, 5);
+        maybe_run_xiangqi_ai_turn_at(&mut world, Instant::now());
+
+        assert_eq!(world.resource::<XiangqiBoard>().cell(4, 5), 7);
+        assert_eq!(world.resource::<XiangqiBoard>().cell(4, 4), -7);
+        assert_eq!(world.resource::<XiangqiUiState>().current_player, RED);
+
+        undo_xiangqi_turn(&mut world);
+        assert_eq!(world.resource::<XiangqiBoard>().cell(4, 6), 7);
+        assert_eq!(world.resource::<XiangqiBoard>().cell(4, 3), -7);
+        assert_eq!(world.resource::<XiangqiUiState>().current_player, RED);
+
+        redo_xiangqi_turn(&mut world);
+        assert_eq!(world.resource::<XiangqiBoard>().cell(4, 5), 7);
+        assert_eq!(world.resource::<XiangqiBoard>().cell(4, 4), -7);
+        assert_eq!(world.resource::<XiangqiUiState>().current_player, RED);
+    }
+
     fn fast_xiangqi_world() -> World {
         let mut world = World::new();
         world.insert_resource(XiangqiBoard::default());
         world.insert_resource(XiangqiUiState::default());
+        world.insert_resource(XiangqiHistory::default());
         let mut scripts = XiangqiScripts::default();
         scripts
             .editor

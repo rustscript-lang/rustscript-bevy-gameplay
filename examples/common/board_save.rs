@@ -12,6 +12,9 @@ pub struct ScriptSave {
 pub struct BoardSavePackage {
     pub cells: Vec<i64>,
     pub scripts: Vec<ScriptSave>,
+    pub state: Option<String>,
+    pub undo_history: Vec<String>,
+    pub redo_history: Vec<String>,
 }
 
 pub fn save_board_file(
@@ -56,6 +59,17 @@ pub fn display_file_name(path: &std::path::Path) -> String {
 }
 
 pub fn encode_board_save(game: &str, cells: &[i64], scripts: &[(&str, &str)]) -> String {
+    encode_board_save_with_history(game, cells, scripts, None, &[], &[])
+}
+
+pub fn encode_board_save_with_history(
+    game: &str,
+    cells: &[i64],
+    scripts: &[(&str, &str)],
+    state: Option<&str>,
+    undo_history: &[String],
+    redo_history: &[String],
+) -> String {
     let mut output = String::new();
     output.push_str("rustscript-board-save-v1\n");
     output.push_str(&format!("game={game}\n"));
@@ -72,6 +86,21 @@ pub fn encode_board_save(game: &str, cells: &[i64], scripts: &[(&str, &str)]) ->
         output.push_str(title);
         output.push_str(".hex=");
         output.push_str(&hex_encode(source.as_bytes()));
+        output.push('\n');
+    }
+    if let Some(state) = state {
+        output.push_str("state.hex=");
+        output.push_str(&hex_encode(state.as_bytes()));
+        output.push('\n');
+    }
+    for snapshot in undo_history {
+        output.push_str("history.undo.hex=");
+        output.push_str(&hex_encode(snapshot.as_bytes()));
+        output.push('\n');
+    }
+    for snapshot in redo_history {
+        output.push_str("history.redo.hex=");
+        output.push_str(&hex_encode(snapshot.as_bytes()));
         output.push('\n');
     }
     output
@@ -91,6 +120,9 @@ pub fn decode_board_save(
     let mut game = None;
     let mut cells = None;
     let mut scripts = Vec::new();
+    let mut state = None;
+    let mut undo_history = Vec::new();
+    let mut redo_history = Vec::new();
     for line in lines {
         if let Some(value) = line.strip_prefix("game=") {
             game = Some(value.to_string());
@@ -117,6 +149,21 @@ pub fn decode_board_save(
                 source: String::from_utf8(hex_decode(hex)?)
                     .map_err(|_| format!("script {title} is not UTF-8"))?,
             });
+        } else if let Some(hex) = line.strip_prefix("state.hex=") {
+            state = Some(
+                String::from_utf8(hex_decode(hex)?)
+                    .map_err(|_| "saved state is not UTF-8".to_string())?,
+            );
+        } else if let Some(hex) = line.strip_prefix("history.undo.hex=") {
+            undo_history.push(
+                String::from_utf8(hex_decode(hex)?)
+                    .map_err(|_| "undo history entry is not UTF-8".to_string())?,
+            );
+        } else if let Some(hex) = line.strip_prefix("history.redo.hex=") {
+            redo_history.push(
+                String::from_utf8(hex_decode(hex)?)
+                    .map_err(|_| "redo history entry is not UTF-8".to_string())?,
+            );
         }
     }
 
@@ -136,7 +183,13 @@ pub fn decode_board_save(
         }
     }
 
-    Ok(BoardSavePackage { cells, scripts })
+    Ok(BoardSavePackage {
+        cells,
+        scripts,
+        state,
+        undo_history,
+        redo_history,
+    })
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -177,6 +230,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn board_save_roundtrips_optional_state_and_history() {
+        let undo_history = vec!["turn=1;cells=0,1,0".to_string()];
+        let redo_history = vec!["turn=2;cells=0,1,2".to_string()];
+        let text = encode_board_save_with_history(
+            "gomoku",
+            &[0, 1, 2],
+            &[("move.rss", "0"), ("ai.rss", "1")],
+            Some("turn=3;cells=0,1,2"),
+            &undo_history,
+            &redo_history,
+        );
+
+        let decoded = decode_board_save(&text, "gomoku", 3, &["move.rss", "ai.rss"]).unwrap();
+
+        assert_eq!(decoded.state.as_deref(), Some("turn=3;cells=0,1,2"));
+        assert_eq!(decoded.undo_history, undo_history);
+        assert_eq!(decoded.redo_history, redo_history);
+    }
+
+    #[test]
     fn board_save_roundtrips_cells_and_scripts() {
         let text = encode_board_save(
             "gomoku",
@@ -192,6 +265,9 @@ mod tests {
         assert_eq!(decoded.cells, vec![0, 1, 2]);
         assert_eq!(decoded.scripts[0].title, "move.rss");
         assert_eq!(decoded.scripts[0].source, "let move_x: int = 1;\nmove_x");
+        assert_eq!(decoded.state, None);
+        assert!(decoded.undo_history.is_empty());
+        assert!(decoded.redo_history.is_empty());
         assert_eq!(decoded.scripts[1].source, "let note = \"脚本\";\n0");
     }
 }
