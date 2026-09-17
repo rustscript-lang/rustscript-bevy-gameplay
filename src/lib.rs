@@ -1368,6 +1368,18 @@ fn bevy_xiangqi_host_module() -> HostModuleDescriptor {
 }
 
 /// Guest catalog derived from [`bevy_host_modules`] in declaration order.
+///
+/// Fingerprint policy: [`HostApiCatalog::fingerprint`] is pd-vm's 64-bit FNV-1a
+/// over the guest surface (resource keys, named structs, function names,
+/// parameter labels/types/passing modes, and return types), prefixed by pd-vm's
+/// domain magic and fingerprint format version. Documentation and runtime-only
+/// adapter/effect details are excluded. Tests pin the exact hex and `u64`
+/// digest. Update that golden snapshot when this catalog's guest surface
+/// changes, or when the frozen RustScript revision changes pd-vm's fingerprint
+/// encoding. Do not change the snapshot for host-private TLS/`HostState`,
+/// adapter bodies, timings, or documentation-only edits. pd-vm owns the
+/// fingerprint format version; this crate does not carry a parallel schema
+/// version.
 pub fn bevy_host_catalog() -> Arc<HostApiCatalog> {
     static CATALOG: OnceLock<Arc<HostApiCatalog>> = OnceLock::new();
     CATALOG

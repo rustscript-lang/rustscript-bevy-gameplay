@@ -12,8 +12,23 @@ use rustscript_bevy_gameplay::{
 };
 use vm::{
     CompileSourceFileOptions, HostApiCatalog, HostFunctionDescriptor, HostFunctionRegistry,
-    HostTypeSchema, SourceFlavor, Vm, compile_source_with_flavor_and_options,
+    HostFunctionSchema, HostTypeSchema, SourceFlavor, Vm, VmError,
+    compile_source_with_flavor_and_options,
 };
+
+/// Exact hex form of [`bevy_host_catalog`]'s fingerprint (`Display` is 16
+/// lowercase hex digits). Bump together with [`BEVY_HOST_CATALOG_FINGERPRINT_U64`]
+/// when the guest catalog surface or frozen pd-vm fingerprint encoding changes.
+/// See [`bevy_host_catalog`] for the full policy.
+const BEVY_HOST_CATALOG_FINGERPRINT_HEX: &str = "61e3eaf5de92afc7";
+/// Exact `u64` form of the same digest. Keep in lockstep with the hex snapshot.
+const BEVY_HOST_CATALOG_FINGERPRINT_U64: u64 = 0x61e3eaf5de92afc7;
+
+const LISTED_HOST_SOURCE: &str = "use bevy;\nbevy::World::contains_entity();\n";
+const UNLISTED_HOST_SOURCE: &str = "use bevy;\nbevy::World::not_a_host();\n";
+const LISTED_HOST_NAME: &str = "bevy::World::contains_entity";
+const UNLISTED_HOST_NAME: &str = "bevy::World::not_a_host";
+const LATE_FAILURE_HOST_NAME: &str = "bevy::Xiangqi::board";
 
 const EXPECTED_HOST_NAMES: &[&str] = &[
     "bevy::World::contains_entity",
@@ -49,6 +64,123 @@ fn compose_catalog() -> HostApiCatalog {
         .flat_map(|module| module.descriptors())
         .collect();
     HostFunctionDescriptor::collect_catalog(&descriptors).expect("composed catalog")
+}
+
+fn compile_rss(
+    source: &str,
+    catalog: Option<std::sync::Arc<HostApiCatalog>>,
+) -> Result<vm::CompiledProgram, vm::SourcePathError> {
+    let mut options = CompileSourceFileOptions::default();
+    if let Some(catalog) = catalog {
+        options = options.with_host_api_catalog(catalog);
+    }
+    compile_source_with_flavor_and_options(source, SourceFlavor::RustScript, options)
+}
+
+fn catalog_from_functions(
+    functions: impl IntoIterator<Item = HostFunctionSchema>,
+) -> HostApiCatalog {
+    let production = bevy_host_catalog();
+    assert!(
+        production.resources().is_empty(),
+        "Bevy composition has no guest resources; resource rollback is N/A"
+    );
+    assert!(
+        production.structs().is_empty(),
+        "Bevy composition has no named structs; named-struct catalog rollback is N/A"
+    );
+    let mut builder = HostApiCatalog::builder();
+    for function in functions {
+        builder.function(function);
+    }
+    builder.build().expect("test catalog must validate")
+}
+
+fn late_failure_xiangqi_catalog() -> HostApiCatalog {
+    catalog_from_functions(bevy_host_catalog().functions().iter().map(|function| {
+        let mut function = function.clone();
+        if function.name == LATE_FAILURE_HOST_NAME {
+            assert_eq!(
+                function.return_type,
+                HostTypeSchema::Array(Box::new(HostTypeSchema::Int)),
+                "late-failure fixture must start from the production board return"
+            );
+            function.return_type = HostTypeSchema::Int;
+        }
+        function
+    }))
+}
+
+fn catalog_with_unlisted_host() -> std::sync::Arc<HostApiCatalog> {
+    let mut functions: Vec<_> = bevy_host_catalog().functions().to_vec();
+    functions.push(HostFunctionSchema::with_return(
+        UNLISTED_HOST_NAME,
+        Vec::new(),
+        HostTypeSchema::Bool,
+    ));
+    std::sync::Arc::new(catalog_from_functions(functions))
+}
+
+fn cargo_lock_package_source(lock: &str, crate_name: &str) -> Option<String> {
+    let mut current_name: Option<&str> = None;
+    for line in lock.lines() {
+        let line = line.trim();
+        if line == "[[package]]" {
+            current_name = None;
+            continue;
+        }
+        if let Some(name) = line
+            .strip_prefix("name = \"")
+            .and_then(|rest| rest.strip_suffix('"'))
+        {
+            current_name = Some(name);
+            continue;
+        }
+        if let Some(source) = line
+            .strip_prefix("source = \"")
+            .and_then(|rest| rest.strip_suffix('"'))
+            && current_name == Some(crate_name)
+        {
+            return Some(source.to_string());
+        }
+    }
+    None
+}
+
+fn assert_bevy_hosts_absent(registry: &HostFunctionRegistry) {
+    for name in EXPECTED_HOST_NAMES {
+        assert!(
+            !registry.contains_name(name),
+            "failed composition must not leave {name} installed"
+        );
+    }
+}
+
+fn assert_listed_bind_denied(registry: &HostFunctionRegistry) {
+    let compiled = compile_rss(LISTED_HOST_SOURCE, Some(bevy_host_catalog()))
+        .expect("listed host compiles against the production catalog");
+    assert!(
+        compiled
+            .program
+            .imports
+            .iter()
+            .any(|import| import.name == LISTED_HOST_NAME),
+        "listed compile must record the exact host import, not an unknown-name elision"
+    );
+    let mut vm = Vm::new(compiled.program);
+    match registry.bind_vm_cached(&mut vm) {
+        Err(VmError::UnboundImport(name)) => {
+            assert_eq!(name, LISTED_HOST_NAME);
+        }
+        Err(VmError::HostError(message))
+            if message.contains("capability profile does not allow") =>
+        {
+            panic!(
+                "listed bind was capability-denied; rollback must drop the registry entry entirely: {message}"
+            );
+        }
+        other => panic!("listed bind must be denied as UnboundImport, got {other:?}"),
+    }
 }
 
 fn schema_is_dynamic(schema: &HostTypeSchema) -> bool {
@@ -107,12 +239,23 @@ fn composition_owns_every_host_function_in_declaration_order() {
 }
 
 #[test]
-fn catalog_fingerprint_is_deterministic_and_schema_stable() {
+fn catalog_fingerprint_matches_golden_hex_and_u64() {
+    // Snapshot policy is documented on `bevy_host_catalog`: bump both constants
+    // together when the guest surface or frozen pd-vm fingerprint encoding
+    // changes. Adapter bodies, TLS/HostState, timings, and docs must not.
     let first = compose_catalog();
     let second = compose_catalog();
+    let production = bevy_host_catalog();
     assert_eq!(first.fingerprint(), second.fingerprint());
-    assert_eq!(first.fingerprint(), bevy_host_catalog().fingerprint());
-    assert_eq!(format!("{}", first.fingerprint()).len(), 16);
+    assert_eq!(first.fingerprint(), production.fingerprint());
+
+    let fingerprint = first.fingerprint();
+    assert_eq!(format!("{fingerprint}"), BEVY_HOST_CATALOG_FINGERPRINT_HEX);
+    assert_eq!(fingerprint.as_u64(), BEVY_HOST_CATALOG_FINGERPRINT_U64);
+    assert_eq!(
+        format!("{:016x}", fingerprint.as_u64()),
+        BEVY_HOST_CATALOG_FINGERPRINT_HEX
+    );
 
     let board = first
         .functions_named("bevy::Gomoku::board")
@@ -154,7 +297,72 @@ fn dynamic_map_any_unknown_allowlist_is_empty() {
 }
 
 #[test]
-fn exact_restricted_binding_installs_composition_and_rejects_undeclared_hosts() {
+fn listed_host_does_not_compile_without_catalog() {
+    match compile_rss(LISTED_HOST_SOURCE, None) {
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                !message.contains("UnboundImport")
+                    && !message.to_lowercase().contains("unbound import"),
+                "compiler unknown-name failure must not masquerade as a bind error: {message}"
+            );
+            assert!(
+                message.contains(LISTED_HOST_NAME)
+                    || message.contains("unknown")
+                    || message.contains("not found")
+                    || message.contains("host")
+                    || message.contains("namespace"),
+                "compile-without-catalog error should name the missing host or catalog: {message}"
+            );
+        }
+        Ok(compiled) => {
+            assert!(
+                compiled
+                    .program
+                    .host_import_schemas()
+                    .iter()
+                    .all(|schema| schema
+                        .as_ref()
+                        .is_none_or(|schema| schema.name != LISTED_HOST_NAME)),
+                "without a catalog the listed host must not receive exact import schemas"
+            );
+        }
+    }
+}
+
+#[test]
+fn listed_host_compiles_against_production_catalog() {
+    let compiled = compile_rss(LISTED_HOST_SOURCE, Some(bevy_host_catalog()))
+        .expect("listed host compiles against the production catalog");
+    assert!(
+        compiled
+            .program
+            .imports
+            .iter()
+            .any(|import| import.name == LISTED_HOST_NAME && import.arity == 0),
+        "production catalog compile must emit the listed host import"
+    );
+    assert!(
+        compiled
+            .program
+            .host_import_schemas()
+            .iter()
+            .any(|schema| schema
+                .as_ref()
+                .is_some_and(|schema| schema.name == LISTED_HOST_NAME)),
+        "production catalog compile must emit exact host import schemas"
+    );
+}
+
+#[test]
+fn restricted_registry_denies_listed_host_before_install() {
+    let registry = HostFunctionRegistry::restricted();
+    assert_bevy_hosts_absent(&registry);
+    assert_listed_bind_denied(&registry);
+}
+
+#[test]
+fn production_install_allows_listed_host_bind() {
     let catalog = bevy_host_catalog();
     let mut registry = HostFunctionRegistry::restricted();
     install_bevy_host_modules(&mut registry, catalog.as_ref()).expect("install composition");
@@ -164,56 +372,83 @@ fn exact_restricted_binding_installs_composition_and_rejects_undeclared_hosts() 
             "restricted registry missing {name}"
         );
     }
-    match compile_source_with_flavor_and_options(
-        "use bevy;\nbevy::World::not_a_host();\n",
-        SourceFlavor::RustScript,
-        CompileSourceFileOptions::default().with_host_api_catalog(catalog.clone()),
-    ) {
-        Err(_) => {}
-        Ok(compiled) => {
-            let mut vm = Vm::new(compiled.program);
-            match registry.bind_vm_cached(&mut vm) {
-                Err(_) => {}
-                Ok(()) => {
-                    assert!(
-                        vm.run().is_err(),
-                        "undeclared host must not execute through exact binding"
-                    );
-                }
-            }
-        }
-    }
-
-    let compiled = compile_source_with_flavor_and_options(
-        r#"
-use bevy;
-bevy::World::contains_entity();
-"#,
-        SourceFlavor::RustScript,
-        CompileSourceFileOptions::default().with_host_api_catalog(catalog.clone()),
-    )
-    .expect("script compiles against production catalog");
+    let compiled = compile_rss(LISTED_HOST_SOURCE, Some(catalog))
+        .expect("listed host compiles against the production catalog");
     let mut vm = Vm::new(compiled.program);
     registry
         .bind_vm_cached(&mut vm)
-        .expect("exact bind against composed catalog");
+        .expect("production install must allow the listed host");
 }
 
 #[test]
-fn transactional_install_rolls_back_when_catalog_does_not_match() {
+fn unlisted_host_is_denied_at_bind_when_compilation_reaches_bind() {
+    let extra_catalog = catalog_with_unlisted_host();
+    let compiled = compile_rss(UNLISTED_HOST_SOURCE, Some(extra_catalog))
+        .expect("unlisted host must compile when the catalog is constructed to include it");
+    assert!(
+        compiled
+            .program
+            .imports
+            .iter()
+            .any(|import| import.name == UNLISTED_HOST_NAME),
+        "unlisted compile must reach bind with the extra import recorded"
+    );
+
+    let production = bevy_host_catalog();
     let mut registry = HostFunctionRegistry::restricted();
-    let empty = HostApiCatalog::builder()
-        .build()
-        .expect("empty catalog builds");
-    let error = install_bevy_host_modules(&mut registry, &empty)
-        .expect_err("install against an empty catalog must fail");
-    let _ = error;
-    for name in EXPECTED_HOST_NAMES {
-        assert!(
-            !registry.contains_name(name),
-            "failed composition must not leave {name} installed"
-        );
+    install_bevy_host_modules(&mut registry, production.as_ref()).expect("install composition");
+    assert!(
+        !registry.contains_name(UNLISTED_HOST_NAME),
+        "production registry must not install the unlisted host"
+    );
+
+    let mut vm = Vm::new(compiled.program);
+    match registry.bind_vm_cached(&mut vm) {
+        Err(VmError::UnboundImport(name)) => assert_eq!(name, UNLISTED_HOST_NAME),
+        other => panic!("unlisted import must be denied at bind as UnboundImport, got {other:?}"),
     }
+}
+
+#[test]
+fn transactional_install_rolls_back_when_later_module_schema_does_not_match() {
+    let mut registry = HostFunctionRegistry::restricted();
+    let named_structs_before = registry.named_struct_schemas().clone();
+    let inert = compile_rss("1;\n", None).expect("inert program compiles without a host catalog");
+    assert!(
+        inert.program.imports.is_empty(),
+        "generation probe must not introduce host imports"
+    );
+    let generation_plan = registry
+        .prepare_plan(&inert.program.imports)
+        .expect("empty-import plan is the observable generation/capability snapshot");
+
+    let late_failure = late_failure_xiangqi_catalog();
+    let error = install_bevy_host_modules(&mut registry, &late_failure)
+        .expect_err("install must enter the composition transaction and fail on the last module");
+    let message = error.to_string();
+    assert!(
+        message.contains(LATE_FAILURE_HOST_NAME),
+        "late-failure catalog must reach xiangqi schema/adapter mismatch, got: {message}"
+    );
+    assert!(
+        !message.contains("bevy::World::contains_entity")
+            && !message.contains("bevy.world")
+            && !message.to_lowercase().contains("empty catalog"),
+        "failure must not be an early empty-catalog validation miss: {message}"
+    );
+
+    assert_bevy_hosts_absent(&registry);
+    assert_listed_bind_denied(&registry);
+    assert_eq!(
+        registry.named_struct_schemas(),
+        &named_structs_before,
+        "named-struct table must be unchanged after rollback"
+    );
+
+    let mut vm = Vm::new(inert.program);
+    registry
+        .bind_vm_with_plan(&mut vm, &generation_plan)
+        .expect("rollback must leave registry generation and capability snapshot unchanged");
 }
 
 #[test]
@@ -233,12 +468,10 @@ fn rustscript_crates_are_pinned_to_the_frozen_full_sha() {
         "git+https://github.com/rustscript-lang/rustscript?rev={FROZEN_RUSTSCRIPT_REV}#{FROZEN_RUSTSCRIPT_REV}"
     );
     for crate_name in ["pd-vm", "pd-host-function", "pd-host-schema"] {
-        assert!(
-            cargo_lock.contains(&format!("name = \"{crate_name}\"")),
-            "{crate_name} must appear in Cargo.lock"
-        );
-        assert!(
-            cargo_lock.contains(&expected_source),
+        let source = cargo_lock_package_source(&cargo_lock, crate_name)
+            .unwrap_or_else(|| panic!("{crate_name} must appear with a source in Cargo.lock"));
+        assert_eq!(
+            source, expected_source,
             "{crate_name} must resolve to the frozen git SHA"
         );
     }
