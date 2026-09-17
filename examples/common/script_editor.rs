@@ -5,7 +5,10 @@ use std::{
 };
 
 use bevy_egui::egui;
-use vm::{DebugCommandBridge, DebugCommandBridgeError, SourceError, SourceMap, compile_source};
+use rustscript_bevy_gameplay::compile_bevy_script;
+#[cfg(test)]
+use vm::compile_source;
+use vm::{DebugCommandBridge, DebugCommandBridgeError, SourceError, SourceMap, SourcePathError};
 
 const CODE_FONT_SIZE: f32 = 13.0;
 
@@ -842,7 +845,7 @@ struct ScriptToken {
 }
 
 impl ScriptToken {
-    fn text<'a>(self, source: &'a str) -> &'a str {
+    fn text(self, source: &str) -> &str {
         &source[self.start..self.end]
     }
 }
@@ -1057,9 +1060,15 @@ fn next_non_ws_starts_with(source: &str, cursor: usize, needle: char) -> bool {
 fn script_compile_diagnostics(source: &str, prefix: &str) -> Vec<ScriptDiagnostic> {
     let full_source = format!("{prefix}{source}");
     let prefix_lines = prefix.lines().count();
-    match compile_source(&full_source) {
+    match compile_bevy_script(&full_source) {
         Ok(_) => Vec::new(),
-        Err(SourceError::Parse(err)) => {
+        Err(
+            SourcePathError::Source(SourceError::Parse(err))
+            | SourcePathError::SourceWithMap {
+                error: SourceError::Parse(err),
+                ..
+            },
+        ) => {
             let mut source_map = SourceMap::new();
             let source_id = source_map.add_source("<editor>", full_source);
             let err = err.with_line_span_from_source(&source_map, source_id);
@@ -1080,7 +1089,13 @@ fn script_compile_diagnostics(source: &str, prefix: &str) -> Vec<ScriptDiagnosti
                 err.message,
             )]
         }
-        Err(SourceError::Compile(err)) => {
+        Err(
+            SourcePathError::Source(SourceError::Compile(err))
+            | SourcePathError::SourceWithMap {
+                error: SourceError::Compile(err),
+                ..
+            },
+        ) => {
             let mut source_map = SourceMap::new();
             let source_id = source_map.add_source("<editor>", full_source);
             let full_line = err.line().unwrap_or(1).max(1);
@@ -1093,6 +1108,19 @@ fn script_compile_diagnostics(source: &str, prefix: &str) -> Vec<ScriptDiagnosti
                 prefix_lines,
                 span.map(|span| (span.lo, span.hi)),
                 err.diagnostic_message(),
+            )]
+        }
+        Err(other) => {
+            let mut source_map = SourceMap::new();
+            let source_id = source_map.add_source("<editor>", full_source);
+            vec![script_diagnostic_from_parts(
+                source,
+                &source_map,
+                source_id,
+                1,
+                prefix_lines,
+                None,
+                other.to_string(),
             )]
         }
     }

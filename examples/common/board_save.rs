@@ -58,6 +58,7 @@ pub fn display_file_name(path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+#[allow(dead_code)]
 pub fn encode_board_save(game: &str, cells: &[i64], scripts: &[(&str, &str)]) -> String {
     encode_board_save_with_history(game, cells, scripts, None, &[], &[])
 }

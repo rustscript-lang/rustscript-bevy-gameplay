@@ -1,3 +1,5 @@
+#![allow(clippy::drop_non_drop)]
+
 use std::{
     sync::{Arc, Mutex, mpsc},
     thread,

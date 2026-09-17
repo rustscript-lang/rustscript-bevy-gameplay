@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use bevy::{
     asset::RenderAssetUsages,
     camera::{OrthographicProjection, Projection, ScalingMode},
@@ -11,10 +13,10 @@ use bevy_egui::{
 use rustscript_bevy_gameplay::{
     AttackCooldownMs, AttackPower, AttackStyle, Enemy, Health, Player, PlayerProjectileLoadout,
     Position, RewardItem, ScriptManagedEnemy, ShooterSpawnRules, Velocity, apply_shooter_script,
-    tick_shooter_spawn_rules,
+    compile_bevy_script, tick_shooter_spawn_rules,
 };
 use std::f32::consts::FRAC_PI_2;
-use vm::{SourceError, SourceMap, compile_source};
+use vm::{SourceError, SourceMap, SourcePathError};
 
 const SCRIPT: &str = include_str!("../scripts/shooter_game.rss");
 const LEFT: f32 = -260.0;
@@ -178,7 +180,7 @@ struct ScriptToken {
 }
 
 impl ScriptToken {
-    fn text<'a>(self, source: &'a str) -> &'a str {
+    fn text(self, source: &str) -> &str {
         &source[self.start..self.end]
     }
 }
@@ -388,7 +390,7 @@ fn next_non_ws_starts_with(source: &str, cursor: usize, needle: char) -> bool {
 }
 
 fn script_compile_diagnostics(source: &str, fallback_error: &str) -> Vec<ScriptDiagnostic> {
-    match compile_source(source) {
+    match compile_bevy_script(source) {
         Ok(_) => {
             if fallback_error.trim().is_empty() {
                 Vec::new()
@@ -396,7 +398,13 @@ fn script_compile_diagnostics(source: &str, fallback_error: &str) -> Vec<ScriptD
                 vec![fallback_script_diagnostic(source, fallback_error)]
             }
         }
-        Err(SourceError::Parse(err)) => {
+        Err(
+            SourcePathError::Source(SourceError::Parse(err))
+            | SourcePathError::SourceWithMap {
+                error: SourceError::Parse(err),
+                ..
+            },
+        ) => {
             let mut source_map = SourceMap::new();
             let source_id = source_map.add_source("<editor>", source.to_string());
             let err = err.with_line_span_from_source(&source_map, source_id);
@@ -414,7 +422,13 @@ fn script_compile_diagnostics(source: &str, fallback_error: &str) -> Vec<ScriptD
                 err.message,
             )]
         }
-        Err(SourceError::Compile(err)) => {
+        Err(
+            SourcePathError::Source(SourceError::Compile(err))
+            | SourcePathError::SourceWithMap {
+                error: SourceError::Compile(err),
+                ..
+            },
+        ) => {
             let mut source_map = SourceMap::new();
             let source_id = source_map.add_source("<editor>", source.to_string());
             let line = err.line().unwrap_or(1).max(1);
@@ -427,6 +441,7 @@ fn script_compile_diagnostics(source: &str, fallback_error: &str) -> Vec<ScriptD
                 err.diagnostic_message(),
             )]
         }
+        Err(other) => vec![fallback_script_diagnostic(source, &other.to_string())],
     }
 }
 
@@ -1132,7 +1147,6 @@ fn spawn_starfield(commands: &mut Commands, assets: &ShooterAssets) {
                 translation: Vec3::new(x, y, -8.0),
                 scale: Vec3::splat(scale),
                 rotation: Quat::from_rotation_z((index as f32 * 0.37) % std::f32::consts::TAU),
-                ..default()
             },
             VisualMotion {
                 base_scale: Vec3::splat(scale),
