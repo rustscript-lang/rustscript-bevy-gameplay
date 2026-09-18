@@ -17,12 +17,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: rustscript-bevy-gameplay
-      - uses: actions/checkout@v4
-        with:
-          repository: rustscript-lang/rustscript
-          path: rustscript
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -40,14 +34,10 @@ jobs:
             libxrandr-dev \
             pkg-config
       - name: Format check
-        working-directory: rustscript-bevy-gameplay
         run: cargo fmt --all -- --check
       - name: Clippy
-        working-directory: rustscript-bevy-gameplay
-        run: cargo clippy --all-targets
+        run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Tests (skip perf)
-        working-directory: rustscript-bevy-gameplay
         run: cargo test --tests
       - name: Example run
-        working-directory: rustscript-bevy-gameplay
         run: cargo run --example combat

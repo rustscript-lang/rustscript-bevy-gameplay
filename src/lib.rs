@@ -1,11 +1,20 @@
-use std::{cell::RefCell, collections::HashMap, time::Instant};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+    time::Instant,
+};
 
 use bevy_ecs::prelude::*;
-pub(crate) use vm::Vm;
 use vm::{
-    CallOutcome, CallReturn, Debugger, JitConfig, Value, VmError, VmResult, VmStatus,
-    compile_source,
+    CompileSourceFileOptions, Debugger, HostApiCatalog, HostFunctionDescriptor,
+    HostFunctionRegistry, HostModuleDescriptor, HostTypeSchema, JitConfig, SourceFlavor,
+    SourcePathError, VmError, VmStatus, compile_source_with_flavor_and_options,
 };
+pub(crate) use vm::{Value, Vm, VmResult};
+
+/// Frozen `rustscript-lang/rustscript` revision this crate is pinned to.
+pub const FROZEN_RUSTSCRIPT_REV: &str = "b1d6cffede77f49410bf63525f30b9a46b02dc01";
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Health(pub i64);
@@ -337,10 +346,9 @@ pub struct DamageRules {
 impl DamageRules {
     pub fn from_source(source: impl Into<String>) -> Result<Self, String> {
         let source = source.into();
-        compile_source(&format!(
+        compile_bevy_source(&format!(
             "let incoming = 0;\nlet critical = false;\n{source}"
-        ))
-        .map_err(|err| err.to_string())?;
+        ))?;
         Ok(Self { source })
     }
 }
@@ -360,7 +368,7 @@ pub fn apply_scripted_damage(
 }
 
 pub fn apply_shooter_script(world: &mut World, source: &str) -> Result<ShooterSummary, String> {
-    compile_source(source).map_err(|err| err.to_string())?;
+    compile_bevy_source(source)?;
     world.insert_resource(ShooterSpawnRules::default());
     let (_, jit) = with_shooter_context(world, || run_shooter_script(source))?;
     summarize_shooter_world(world, jit)
@@ -555,6 +563,7 @@ pub fn choose_xiangqi_ai_move_with_bias(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn debug_xiangqi_move_script(
     world: &mut World,
     source: &str,
@@ -880,6 +889,12 @@ struct XiangqiContext {
 }
 
 thread_local! {
+    // Raw host-private Bevy world/entity boundary. Guest scripts do not receive
+    // a world or entity handle; each evaluation installs a call-scoped pointer
+    // for the duration of one synchronous VM run. This is not a guest resource
+    // and is not HostState, so cached AI VMs can keep their compiled program
+    // while the live Bevy world changes between runs. Combat, shooter, Gomoku,
+    // and Xiangqi each own one of these slots.
     static BEVY_CONTEXT: RefCell<Option<BevyContext>> = const { RefCell::new(None) };
     static SHOOTER_CONTEXT: RefCell<Option<ShooterContext>> = const { RefCell::new(None) };
     static GOMOKU_CONTEXT: RefCell<Option<GomokuContext>> = const { RefCell::new(None) };
@@ -1014,7 +1029,7 @@ fn with_xiangqi_world<T>(f: impl FnOnce(&mut World) -> VmResult<T>) -> VmResult<
 }
 
 fn run_value(source: &str) -> Result<Value, String> {
-    let compiled = compile_source(source).map_err(|err| err.to_string())?;
+    let compiled = compile_bevy_source(source)?;
     let mut vm = Vm::new(compiled.program);
     bind_bevy_hosts(&mut vm);
     let status = vm.run().map_err(|err| err.to_string())?;
@@ -1029,7 +1044,7 @@ fn run_value(source: &str) -> Result<Value, String> {
 
 fn run_gomoku_script(source: &str) -> Result<(Value, GomokuScriptTelemetry), String> {
     let started = Instant::now();
-    let compiled = compile_source(source).map_err(|err| err.to_string())?;
+    let compiled = compile_bevy_source(source)?;
     let mut vm = Vm::new_with_jit_config(compiled.program, gomoku_jit_config());
     bind_gomoku_hosts(&mut vm);
     let status = vm.run().map_err(|err| err.to_string())?;
@@ -1059,7 +1074,7 @@ fn run_cached_gomoku_ai_script(source: &str) -> Result<(Value, GomokuScriptTelem
             if cache.len() >= AI_VM_CACHE_LIMIT {
                 cache.clear();
             }
-            let compiled = compile_source(source).map_err(|err| err.to_string())?;
+            let compiled = compile_bevy_source(source)?;
             let mut vm = Vm::new_with_jit_config(compiled.program, gomoku_jit_config());
             bind_gomoku_hosts(&mut vm);
             cache.insert(source.to_string(), vm);
@@ -1068,7 +1083,7 @@ fn run_cached_gomoku_ai_script(source: &str) -> Result<(Value, GomokuScriptTelem
         let vm = cache
             .get_mut(source)
             .ok_or_else(|| "gomoku AI VM cache missed after insert".to_string())?;
-        vm.reset_for_reuse();
+        vm.reset_for_reuse().map_err(|err| err.to_string())?;
         let started = Instant::now();
         let status = vm.run().map_err(|err| err.to_string())?;
         if status != VmStatus::Halted {
@@ -1096,7 +1111,7 @@ fn run_gomoku_script_with_debugger(
     debugger: &mut Debugger,
 ) -> Result<(Value, GomokuScriptTelemetry), String> {
     let started = Instant::now();
-    let compiled = compile_source(source).map_err(|err| err.to_string())?;
+    let compiled = compile_bevy_source(source)?;
     let mut vm = Vm::new(compiled.program);
     bind_gomoku_hosts(&mut vm);
     let status = vm
@@ -1125,7 +1140,7 @@ fn run_xiangqi_script(
     enable_jit: bool,
 ) -> Result<(Value, XiangqiScriptTelemetry), String> {
     let started = Instant::now();
-    let compiled = compile_source(source).map_err(|err| err.to_string())?;
+    let compiled = compile_bevy_source(source)?;
     let mut vm = if enable_jit {
         Vm::new_with_jit_config(compiled.program, xiangqi_jit_config())
     } else {
@@ -1159,7 +1174,7 @@ fn run_cached_xiangqi_ai_script(source: &str) -> Result<(Value, XiangqiScriptTel
             if cache.len() >= AI_VM_CACHE_LIMIT {
                 cache.clear();
             }
-            let compiled = compile_source(source).map_err(|err| err.to_string())?;
+            let compiled = compile_bevy_source(source)?;
             let mut vm = Vm::new_with_jit_config(compiled.program, xiangqi_jit_config());
             bind_xiangqi_hosts(&mut vm);
             cache.insert(source.to_string(), vm);
@@ -1168,7 +1183,7 @@ fn run_cached_xiangqi_ai_script(source: &str) -> Result<(Value, XiangqiScriptTel
         let vm = cache
             .get_mut(source)
             .ok_or_else(|| "xiangqi AI VM cache missed after insert".to_string())?;
-        vm.reset_for_reuse();
+        vm.reset_for_reuse().map_err(|err| err.to_string())?;
         let started = Instant::now();
         let status = vm.run().map_err(|err| err.to_string())?;
         if status != VmStatus::Halted {
@@ -1196,7 +1211,7 @@ fn run_xiangqi_script_with_debugger(
     debugger: &mut Debugger,
 ) -> Result<(Value, XiangqiScriptTelemetry), String> {
     let started = Instant::now();
-    let compiled = compile_source(source).map_err(|err| err.to_string())?;
+    let compiled = compile_bevy_source(source)?;
     let mut vm = Vm::new(compiled.program);
     bind_xiangqi_hosts(&mut vm);
     let status = vm
@@ -1245,7 +1260,7 @@ fn xiangqi_jit_config() -> JitConfig {
 }
 
 fn run_shooter_script(source: &str) -> Result<(Value, ShooterJitSummary), String> {
-    let compiled = compile_source(source).map_err(|err| err.to_string())?;
+    let compiled = compile_bevy_source(source)?;
     let mut vm = Vm::new_with_jit_config(compiled.program, shooter_jit_config());
     bind_shooter_hosts(&mut vm);
     let status = vm.run().map_err(|err| err.to_string())?;
@@ -1267,155 +1282,168 @@ fn run_shooter_script(source: &str) -> Result<(Value, ShooterJitSummary), String
     ))
 }
 
+/// Compiles RustScript against the composed Bevy host catalog.
+pub fn compile_bevy_script(source: &str) -> Result<vm::CompiledProgram, SourcePathError> {
+    compile_source_with_flavor_and_options(
+        source,
+        SourceFlavor::RustScript,
+        CompileSourceFileOptions::default().with_host_api_catalog(bevy_host_catalog()),
+    )
+}
+
+fn compile_bevy_source(source: &str) -> Result<vm::CompiledProgram, String> {
+    compile_bevy_script(source).map_err(|err| err.to_string())
+}
+
+/// Deterministic ordered Bevy host modules. Catalog construction and exact
+/// runtime binding both walk this list and no other registration table.
+pub fn bevy_host_modules() -> [HostModuleDescriptor; 4] {
+    [
+        bevy_world_host_module(),
+        bevy_shooter_host_module(),
+        bevy_gomoku_host_module(),
+        bevy_xiangqi_host_module(),
+    ]
+}
+
+fn bevy_world_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "bevy.world",
+        functions: &[
+            host::bevy::world_contains_entity_descriptor,
+            host::bevy::world_get_health_descriptor,
+            host::bevy::world_get_armor_descriptor,
+            host::bevy::world_set_health_descriptor,
+        ],
+        resources: &[],
+    }
+}
+
+fn bevy_shooter_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "bevy.shooter",
+        functions: &[
+            host::bevy::shooter_set_player_health_descriptor,
+            host::bevy::shooter_set_player_attack_descriptor,
+            host::bevy::shooter_set_player_projectiles_descriptor,
+            host::bevy::shooter_spawn_enemy_descriptor,
+            host::bevy::shooter_spawn_reward_descriptor,
+            host::bevy::shooter_spawn_enemy_every_descriptor,
+            host::bevy::shooter_spawn_reward_every_descriptor,
+            host::bevy::shooter_spawn_enemy_after_kills_descriptor,
+        ],
+        resources: &[],
+    }
+}
+
+fn bevy_gomoku_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "bevy.gomoku",
+        functions: &[
+            host::bevy::gomoku_board_descriptor,
+            host::bevy::gomoku_board_size_descriptor,
+            host::bevy::gomoku_cell_descriptor,
+            host::bevy::gomoku_set_cell_descriptor,
+            host::bevy::gomoku_set_move_result_descriptor,
+            host::bevy::gomoku_set_ai_move_descriptor,
+        ],
+        resources: &[],
+    }
+}
+
+fn bevy_xiangqi_host_module() -> HostModuleDescriptor {
+    HostModuleDescriptor {
+        name: "bevy.xiangqi",
+        functions: &[
+            host::bevy::xiangqi_board_descriptor,
+            host::bevy::xiangqi_board_width_descriptor,
+            host::bevy::xiangqi_board_height_descriptor,
+            host::bevy::xiangqi_cell_descriptor,
+            host::bevy::xiangqi_set_cell_descriptor,
+            host::bevy::xiangqi_set_move_result_descriptor,
+            host::bevy::xiangqi_set_ai_move_descriptor,
+        ],
+        resources: &[],
+    }
+}
+
+/// Guest catalog derived from [`bevy_host_modules`] in declaration order.
+///
+/// Fingerprint policy: [`HostApiCatalog::fingerprint`] is pd-vm's 64-bit FNV-1a
+/// over the guest surface (resource keys, named structs, function names,
+/// parameter labels/types/passing modes, and return types), prefixed by pd-vm's
+/// domain magic and fingerprint format version. Documentation and runtime-only
+/// adapter/effect details are excluded. Tests pin the exact hex and `u64`
+/// digest. Update that golden snapshot when this catalog's guest surface
+/// changes, or when the frozen RustScript revision changes pd-vm's fingerprint
+/// encoding. Do not change the snapshot for host-private TLS/`HostState`,
+/// adapter bodies, timings, or documentation-only edits. pd-vm owns the
+/// fingerprint format version; this crate does not carry a parallel schema
+/// version.
+pub fn bevy_host_catalog() -> Arc<HostApiCatalog> {
+    static CATALOG: OnceLock<Arc<HostApiCatalog>> = OnceLock::new();
+    CATALOG
+        .get_or_init(|| {
+            Arc::new(
+                compose_bevy_host_catalog().expect("bevy host composition must build a catalog"),
+            )
+        })
+        .clone()
+}
+
+fn compose_bevy_host_catalog() -> Result<HostApiCatalog, vm::HostApiCatalogError> {
+    let descriptors: Vec<_> = bevy_host_modules()
+        .iter()
+        .flat_map(|module| module.descriptors())
+        .collect();
+    HostFunctionDescriptor::collect_catalog(&descriptors)
+}
+
+/// Installs every composed Bevy module into `registry` against `catalog`.
+///
+/// The whole composition is transactional: a later module failure leaves
+/// `registry` unchanged.
+pub fn install_bevy_host_modules(
+    registry: &mut HostFunctionRegistry,
+    catalog: &HostApiCatalog,
+) -> VmResult<HostApiCatalog> {
+    registry.transactionally(|registry| {
+        let mut installed = None;
+        for module in bevy_host_modules() {
+            installed = Some(module.install_from_catalog(registry, catalog)?);
+        }
+        installed.ok_or_else(|| VmError::HostError("bevy host composition is empty".to_string()))
+    })
+}
+
+fn bind_composed_bevy_hosts(vm: &mut Vm) -> Result<(), String> {
+    let catalog = bevy_host_catalog();
+    let mut registry = HostFunctionRegistry::restricted();
+    install_bevy_host_modules(&mut registry, catalog.as_ref()).map_err(|err| err.to_string())?;
+    registry.bind_vm_cached(vm).map_err(|err| err.to_string())
+}
+
 fn bind_bevy_hosts(vm: &mut Vm) {
-    vm.bind_static_args_function(
-        "bevy::World::contains_entity",
-        host::bevy::world_contains_entity_host,
-    );
-    vm.bind_static_args_function("bevy::World::get_health", host::bevy::world_get_health_host);
-    vm.bind_static_args_function("bevy::World::get_armor", host::bevy::world_get_armor_host);
-    vm.bind_static_args_function("bevy::World::set_health", host::bevy::world_set_health_host);
+    bind_composed_bevy_hosts(vm).expect("bevy world hosts install from the composed catalog");
 }
 
 fn bind_shooter_hosts(vm: &mut Vm) {
-    vm.bind_static_args_function(
-        "bevy::Shooter::set_player_health",
-        host::bevy::shooter_set_player_health_host,
-    );
-    vm.bind_static_args_function(
-        "bevy::Shooter::set_player_attack",
-        host::bevy::shooter_set_player_attack_host,
-    );
-    vm.bind_static_args_function(
-        "bevy::Shooter::spawn_enemy",
-        host::bevy::shooter_spawn_enemy_host,
-    );
-    vm.bind_static_args_function(
-        "bevy::Shooter::set_player_projectiles",
-        host::bevy::shooter_set_player_projectiles_host,
-    );
-    vm.bind_static_args_function(
-        "bevy::Shooter::spawn_reward",
-        host::bevy::shooter_spawn_reward_host,
-    );
-    vm.bind_static_args_function(
-        "bevy::Shooter::spawn_enemy_every",
-        host::bevy::shooter_spawn_enemy_every_host,
-    );
-    vm.bind_static_args_function(
-        "bevy::Shooter::spawn_reward_every",
-        host::bevy::shooter_spawn_reward_every_host,
-    );
-    vm.bind_static_args_function(
-        "bevy::Shooter::spawn_enemy_after_kills",
-        host::bevy::shooter_spawn_enemy_after_kills_host,
-    );
+    bind_composed_bevy_hosts(vm).expect("bevy shooter hosts install from the composed catalog");
 }
 
 fn bind_gomoku_hosts(vm: &mut Vm) {
-    vm.bind_static_args_function("bevy::Gomoku::board", host::bevy::gomoku_board_host);
-    vm.bind_static_args_function(
-        "bevy::Gomoku::board_size",
-        host::bevy::gomoku_board_size_host,
-    );
-    vm.bind_static_args_function("bevy::Gomoku::cell", host::bevy::gomoku_cell_host);
-    vm.bind_static_args_function("bevy::Gomoku::set_cell", host::bevy::gomoku_set_cell_host);
-    vm.bind_static_args_function(
-        "bevy::Gomoku::set_move_result",
-        host::bevy::gomoku_set_move_result_host,
-    );
-    vm.bind_static_args_function(
-        "bevy::Gomoku::set_ai_move",
-        host::bevy::gomoku_set_ai_move_host,
-    );
+    bind_composed_bevy_hosts(vm).expect("bevy gomoku hosts install from the composed catalog");
 }
 
 fn bind_xiangqi_hosts(vm: &mut Vm) {
-    vm.bind_static_args_function("bevy::Xiangqi::board", host::bevy::xiangqi_board_host);
-    vm.bind_static_args_function(
-        "bevy::Xiangqi::board_width",
-        host::bevy::xiangqi_board_width_host,
-    );
-    vm.bind_static_args_function(
-        "bevy::Xiangqi::board_height",
-        host::bevy::xiangqi_board_height_host,
-    );
-    vm.bind_static_args_function("bevy::Xiangqi::cell", host::bevy::xiangqi_cell_host);
-    vm.bind_static_args_function("bevy::Xiangqi::set_cell", host::bevy::xiangqi_set_cell_host);
-    vm.bind_static_args_function(
-        "bevy::Xiangqi::set_move_result",
-        host::bevy::xiangqi_set_move_result_host,
-    );
-    vm.bind_static_args_function(
-        "bevy::Xiangqi::set_ai_move",
-        host::bevy::xiangqi_set_ai_move_host,
-    );
+    bind_composed_bevy_hosts(vm).expect("bevy xiangqi hosts install from the composed catalog");
 }
 
 mod host {
     use super::*;
     use pd_host_function::pd_host_function;
-
-    pub(super) trait BorrowVmValue<'a>: Sized {
-        fn borrow_vm_value(value: &'a Value, label: &str) -> VmResult<Self>;
-    }
-
-    pub(super) fn borrow_arg<'a, T>(args: &'a [Value], index: usize, label: &str) -> VmResult<T>
-    where
-        T: BorrowVmValue<'a>,
-    {
-        let value = args
-            .get(index)
-            .ok_or_else(|| VmError::HostError(format!("missing argument: {label}")))?;
-        T::borrow_vm_value(value, label)
-    }
-
-    impl BorrowVmValue<'_> for i64 {
-        fn borrow_vm_value(value: &Value, _label: &str) -> VmResult<Self> {
-            match value {
-                Value::Int(value) => Ok(*value),
-                _ => Err(VmError::TypeMismatch("int")),
-            }
-        }
-    }
-
-    impl BorrowVmValue<'_> for bool {
-        fn borrow_vm_value(value: &Value, _label: &str) -> VmResult<Self> {
-            match value {
-                Value::Bool(value) => Ok(*value),
-                _ => Err(VmError::TypeMismatch("bool")),
-            }
-        }
-    }
-
-    impl<'a> BorrowVmValue<'a> for &'a str {
-        fn borrow_vm_value(value: &'a Value, _label: &str) -> VmResult<Self> {
-            match value {
-                Value::String(value) => Ok(value.as_str()),
-                _ => Err(VmError::TypeMismatch("string")),
-            }
-        }
-    }
-
-    trait IntoVmValue {
-        fn into_vm_value(self) -> Value;
-    }
-
-    impl IntoVmValue for bool {
-        fn into_vm_value(self) -> Value {
-            Value::Bool(self)
-        }
-    }
-
-    impl IntoVmValue for i64 {
-        fn into_vm_value(self) -> Value {
-            Value::Int(self)
-        }
-    }
-
-    fn return_one<T: IntoVmValue>(value: VmResult<T>) -> VmResult<CallOutcome> {
-        Ok(CallOutcome::Return(CallReturn::one(value?.into_vm_value())))
-    }
+    #[allow(unused_imports)]
+    pub(super) use vm::{arg, borrow_arg, take_arg};
 
     pub(super) mod bevy {
         use super::*;
@@ -1424,10 +1452,6 @@ mod host {
         #[pd_host_function(name = "bevy::World::contains_entity")]
         pub(crate) fn world_contains_entity_impl() -> VmResult<bool> {
             with_world(|world, entity| Ok(world.get_entity(entity).is_ok()))
-        }
-
-        pub(crate) fn world_contains_entity_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(world_contains_entity(args))
         }
 
         /// Reads Health via Bevy World::get for the current entity.
@@ -1443,10 +1467,6 @@ mod host {
             })
         }
 
-        pub(crate) fn world_get_health_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(world_get_health(args))
-        }
-
         /// Reads Armor via Bevy World::get for the current entity.
         #[pd_host_function(name = "bevy::World::get_armor")]
         pub(crate) fn world_get_armor_impl() -> VmResult<i64> {
@@ -1458,10 +1478,6 @@ mod host {
                         VmError::HostError(format!("entity {entity:?} is missing Armor"))
                     })
             })
-        }
-
-        pub(crate) fn world_get_armor_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(world_get_armor(args))
         }
 
         /// Writes Health via Bevy World::get_mut for the current entity.
@@ -1476,10 +1492,6 @@ mod host {
             })
         }
 
-        pub(crate) fn world_set_health_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(world_set_health(args))
-        }
-
         /// Updates the live Bevy ECS player Health component from RustScript.
         #[pd_host_function(name = "bevy::Shooter::set_player_health")]
         pub(crate) fn shooter_set_player_health_impl(value: i64) -> VmResult<bool> {
@@ -1491,10 +1503,6 @@ mod host {
                 health.0 = value;
                 Ok(true)
             })
-        }
-
-        pub(crate) fn shooter_set_player_health_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(shooter_set_player_health(args))
         }
 
         /// Updates the live Bevy ECS player attack style, power, and cooldown from RustScript.
@@ -1522,10 +1530,6 @@ mod host {
             })
         }
 
-        pub(crate) fn shooter_set_player_attack_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(shooter_set_player_attack(args))
-        }
-
         /// Updates the player's projectile asset type and simultaneous count from RustScript.
         #[pd_host_function(name = "bevy::Shooter::set_player_projectiles")]
         pub(crate) fn shooter_set_player_projectiles_impl(
@@ -1547,10 +1551,6 @@ mod host {
             })
         }
 
-        pub(crate) fn shooter_set_player_projectiles_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(shooter_set_player_projectiles(args))
-        }
-
         /// Spawns a script-managed enemy by calling Bevy World::spawn.
         #[pd_host_function(name = "bevy::Shooter::spawn_enemy")]
         pub(crate) fn shooter_spawn_enemy_impl(
@@ -1566,10 +1566,6 @@ mod host {
             })
         }
 
-        pub(crate) fn shooter_spawn_enemy_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(shooter_spawn_enemy(args))
-        }
-
         /// Spawns a script-managed reward pickup by calling Bevy World::spawn.
         #[pd_host_function(name = "bevy::Shooter::spawn_reward")]
         pub(crate) fn shooter_spawn_reward_impl(
@@ -1582,10 +1578,6 @@ mod host {
                 spawn_reward_entity(world, kind, amount, x, y);
                 Ok(true)
             })
-        }
-
-        pub(crate) fn shooter_spawn_reward_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(shooter_spawn_reward(args))
         }
 
         /// Registers a repeated enemy spawn rule from RustScript.
@@ -1616,10 +1608,6 @@ mod host {
             })
         }
 
-        pub(crate) fn shooter_spawn_enemy_every_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(shooter_spawn_enemy_every(args))
-        }
-
         /// Registers a repeated reward spawn rule from RustScript.
         #[pd_host_function(name = "bevy::Shooter::spawn_reward_every")]
         pub(crate) fn shooter_spawn_reward_every_impl(
@@ -1644,10 +1632,6 @@ mod host {
                     });
                 Ok(true)
             })
-        }
-
-        pub(crate) fn shooter_spawn_reward_every_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(shooter_spawn_reward_every(args))
         }
 
         /// Registers a one-shot enemy spawn rule gated by kills since script apply.
@@ -1679,29 +1663,18 @@ mod host {
             })
         }
 
-        pub(crate) fn shooter_spawn_enemy_after_kills_host(
-            args: &[Value],
-        ) -> VmResult<CallOutcome> {
-            return_one(shooter_spawn_enemy_after_kills(args))
+        fn gomoku_board_contract() -> vm::HostFunctionSchema {
+            vm::HostFunctionSchema::with_return(
+                "bevy::Gomoku::board",
+                Vec::new(),
+                HostTypeSchema::Array(Box::new(HostTypeSchema::Int)),
+            )
         }
 
-        /// Returns the square Gomoku board size for RustScript scans.
-        #[pd_host_function(name = "bevy::Gomoku::board_size")]
-        pub(crate) fn gomoku_board_size_impl() -> VmResult<i64> {
-            with_gomoku_world(|_world| Ok(GOMOKU_BOARD_SIZE))
-        }
-
-        pub(crate) fn gomoku_board_size_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(gomoku_board_size(args))
-        }
-
-        pub(crate) fn gomoku_board_host(args: &[Value]) -> VmResult<CallOutcome> {
-            if !args.is_empty() {
-                return Err(VmError::HostError(
-                    "bevy::Gomoku::board expects no arguments".to_string(),
-                ));
-            }
-            let board = with_gomoku_world(|world| {
+        /// Returns the Gomoku board cells in row-major order as a typed `[int]`.
+        #[pd_host_function(name = "bevy::Gomoku::board", contract = gomoku_board_contract)]
+        pub(crate) fn gomoku_board_impl() -> VmResult<Value> {
+            with_gomoku_world(|world| {
                 ensure_gomoku_resources(world);
                 Ok(Value::array(
                     world
@@ -1712,8 +1685,13 @@ mod host {
                         .map(Value::Int)
                         .collect(),
                 ))
-            })?;
-            Ok(CallOutcome::Return(CallReturn::one(board)))
+            })
+        }
+
+        /// Returns the square Gomoku board size for RustScript scans.
+        #[pd_host_function(name = "bevy::Gomoku::board_size")]
+        pub(crate) fn gomoku_board_size_impl() -> VmResult<i64> {
+            with_gomoku_world(|_world| Ok(GOMOKU_BOARD_SIZE))
         }
 
         /// Reads a board cell; out-of-bounds cells return a sentinel value.
@@ -1726,10 +1704,6 @@ mod host {
             })
         }
 
-        pub(crate) fn gomoku_cell_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(gomoku_cell(args))
-        }
-
         /// Writes a board cell after RustScript has accepted a move.
         #[pd_host_function(name = "bevy::Gomoku::set_cell")]
         pub(crate) fn gomoku_set_cell_impl(x: i64, y: i64, stone: i64) -> VmResult<bool> {
@@ -1738,10 +1712,6 @@ mod host {
                 let mut board = world.resource_mut::<GomokuBoard>();
                 Ok(board.set_raw(x, y, stone))
             })
-        }
-
-        pub(crate) fn gomoku_set_cell_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(gomoku_set_cell(args))
         }
 
         /// Publishes RustScript move legality and board outcome.
@@ -1761,10 +1731,6 @@ mod host {
             })
         }
 
-        pub(crate) fn gomoku_set_move_result_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(gomoku_set_move_result(args))
-        }
-
         /// Publishes the RustScript-selected AI move.
         #[pd_host_function(name = "bevy::Gomoku::set_ai_move")]
         pub(crate) fn gomoku_set_ai_move_impl(x: i64, y: i64) -> VmResult<bool> {
@@ -1776,37 +1742,18 @@ mod host {
             })
         }
 
-        pub(crate) fn gomoku_set_ai_move_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(gomoku_set_ai_move(args))
+        fn xiangqi_board_contract() -> vm::HostFunctionSchema {
+            vm::HostFunctionSchema::with_return(
+                "bevy::Xiangqi::board",
+                Vec::new(),
+                HostTypeSchema::Array(Box::new(HostTypeSchema::Int)),
+            )
         }
 
-        /// Returns the Xiangqi board width for RustScript scans.
-        #[pd_host_function(name = "bevy::Xiangqi::board_width")]
-        pub(crate) fn xiangqi_board_width_impl() -> VmResult<i64> {
-            with_xiangqi_world(|_world| Ok(XIANGQI_BOARD_WIDTH))
-        }
-
-        pub(crate) fn xiangqi_board_width_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(xiangqi_board_width(args))
-        }
-
-        /// Returns the Xiangqi board height for RustScript scans.
-        #[pd_host_function(name = "bevy::Xiangqi::board_height")]
-        pub(crate) fn xiangqi_board_height_impl() -> VmResult<i64> {
-            with_xiangqi_world(|_world| Ok(XIANGQI_BOARD_HEIGHT))
-        }
-
-        pub(crate) fn xiangqi_board_height_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(xiangqi_board_height(args))
-        }
-
-        pub(crate) fn xiangqi_board_host(args: &[Value]) -> VmResult<CallOutcome> {
-            if !args.is_empty() {
-                return Err(VmError::HostError(
-                    "bevy::Xiangqi::board expects no arguments".to_string(),
-                ));
-            }
-            let board = with_xiangqi_world(|world| {
+        /// Returns the Xiangqi board cells in row-major order as a typed `[int]`.
+        #[pd_host_function(name = "bevy::Xiangqi::board", contract = xiangqi_board_contract)]
+        pub(crate) fn xiangqi_board_impl() -> VmResult<Value> {
+            with_xiangqi_world(|world| {
                 ensure_xiangqi_resources(world);
                 Ok(Value::array(
                     world
@@ -1817,8 +1764,19 @@ mod host {
                         .map(Value::Int)
                         .collect(),
                 ))
-            })?;
-            Ok(CallOutcome::Return(CallReturn::one(board)))
+            })
+        }
+
+        /// Returns the Xiangqi board width for RustScript scans.
+        #[pd_host_function(name = "bevy::Xiangqi::board_width")]
+        pub(crate) fn xiangqi_board_width_impl() -> VmResult<i64> {
+            with_xiangqi_world(|_world| Ok(XIANGQI_BOARD_WIDTH))
+        }
+
+        /// Returns the Xiangqi board height for RustScript scans.
+        #[pd_host_function(name = "bevy::Xiangqi::board_height")]
+        pub(crate) fn xiangqi_board_height_impl() -> VmResult<i64> {
+            with_xiangqi_world(|_world| Ok(XIANGQI_BOARD_HEIGHT))
         }
 
         /// Reads a Xiangqi cell; out-of-bounds cells return a sentinel value.
@@ -1831,10 +1789,6 @@ mod host {
             })
         }
 
-        pub(crate) fn xiangqi_cell_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(xiangqi_cell(args))
-        }
-
         /// Writes a Xiangqi cell after RustScript has accepted a move.
         #[pd_host_function(name = "bevy::Xiangqi::set_cell")]
         pub(crate) fn xiangqi_set_cell_impl(x: i64, y: i64, piece: i64) -> VmResult<bool> {
@@ -1843,10 +1797,6 @@ mod host {
                 let mut board = world.resource_mut::<XiangqiBoard>();
                 Ok(board.set_raw(x, y, piece))
             })
-        }
-
-        pub(crate) fn xiangqi_set_cell_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(xiangqi_set_cell(args))
         }
 
         /// Publishes RustScript move legality and winner.
@@ -1859,10 +1809,6 @@ mod host {
                 state.winner = winner;
                 Ok(true)
             })
-        }
-
-        pub(crate) fn xiangqi_set_move_result_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(xiangqi_set_move_result(args))
         }
 
         /// Publishes the RustScript-selected Xiangqi move.
@@ -1879,10 +1825,6 @@ mod host {
                 state.ai_move = Some((from_x, from_y, to_x, to_y));
                 Ok(true)
             })
-        }
-
-        pub(crate) fn xiangqi_set_ai_move_host(args: &[Value]) -> VmResult<CallOutcome> {
-            return_one(xiangqi_set_ai_move(args))
         }
     }
 }

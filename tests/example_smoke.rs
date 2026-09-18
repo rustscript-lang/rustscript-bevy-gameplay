@@ -16,7 +16,9 @@ fn run_script_smoke_from_empty_cwd(example: &str) -> Output {
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let manifest = manifest_dir.join("Cargo.toml");
-    let target_dir = manifest_dir.join("target").join("script-smoke");
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("target").join("script-smoke"));
     let output = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()))
         .args([
             "run",

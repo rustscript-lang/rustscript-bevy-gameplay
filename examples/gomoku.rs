@@ -1,3 +1,5 @@
+#![allow(clippy::drop_non_drop)]
+
 use std::{
     sync::{Arc, Mutex, mpsc},
     thread,
@@ -496,11 +498,11 @@ fn draw_board(
         let y = grid.top() + offset;
         painter.line_segment(
             [egui::pos2(x, grid.top()), egui::pos2(x, grid.bottom())],
-            egui::Stroke::new(1.2, line),
+            egui::Stroke::new(1.2_f32, line),
         );
         painter.line_segment(
             [egui::pos2(grid.left(), y), egui::pos2(grid.right(), y)],
-            egui::Stroke::new(1.2, line),
+            egui::Stroke::new(1.2_f32, line),
         );
     }
 
@@ -514,7 +516,7 @@ fn draw_board(
         painter.circle_stroke(
             center,
             step * 0.48,
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(94, 132, 196)),
+            egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(94, 132, 196)),
         );
     }
 
@@ -537,7 +539,7 @@ fn draw_board(
                     painter.circle_stroke(
                         center,
                         step * 0.38,
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(168, 160, 144)),
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(168, 160, 144)),
                     );
                 }
                 _ => {}
