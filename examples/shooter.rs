@@ -2523,7 +2523,7 @@ fn script_panel(
                 egui::Frame::new()
                     .fill(egui::Color32::from_rgba_unmultiplied(8, 14, 24, 215))
                     .stroke(egui::Stroke::new(
-                        1.0,
+                        1.0_f32,
                         egui::Color32::from_rgb(120, 170, 210),
                     ))
                     .corner_radius(egui::CornerRadius::same(6))
@@ -2543,7 +2543,7 @@ fn script_panel(
                 egui::Frame::new()
                     .fill(egui::Color32::from_rgba_unmultiplied(8, 16, 28, 190))
                     .stroke(egui::Stroke::new(
-                        1.0,
+                        1.0_f32,
                         egui::Color32::from_rgb(70, 115, 150),
                     ))
                     .corner_radius(egui::CornerRadius::same(6))

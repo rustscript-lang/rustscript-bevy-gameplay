@@ -510,14 +510,14 @@ fn draw_board(
         let px = grid.left() + x as f32 * step_x;
         painter.line_segment(
             [egui::pos2(px, grid.top()), egui::pos2(px, grid.bottom())],
-            egui::Stroke::new(1.25, line_color),
+            egui::Stroke::new(1.25_f32, line_color),
         );
     }
     for y in 0..10 {
         let py = grid.top() + y as f32 * step_y;
         painter.line_segment(
             [egui::pos2(grid.left(), py), egui::pos2(grid.right(), py)],
-            egui::Stroke::new(1.25, line_color),
+            egui::Stroke::new(1.25_f32, line_color),
         );
     }
 
@@ -544,14 +544,14 @@ fn draw_board(
         painter.circle_stroke(
             board_point(grid, step_x, step_y, x, y),
             step_x.min(step_y) * 0.42,
-            egui::Stroke::new(3.0, egui::Color32::from_rgb(60, 105, 190)),
+            egui::Stroke::new(3.0_f32, egui::Color32::from_rgb(60, 105, 190)),
         );
     }
     if let Some(last) = state.last_ai_move {
         painter.circle_stroke(
             board_point(grid, step_x, step_y, last.to_x, last.to_y),
             step_x.min(step_y) * 0.47,
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(36, 118, 88)),
+            egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(36, 118, 88)),
         );
     }
 
@@ -585,8 +585,8 @@ fn draw_palace(
     let right = board_point(grid, step_x, step_y, 5, top_y);
     let bottom_left = board_point(grid, step_x, step_y, 3, top_y + 2);
     let bottom_right = board_point(grid, step_x, step_y, 5, top_y + 2);
-    painter.line_segment([left, bottom_right], egui::Stroke::new(1.2, color));
-    painter.line_segment([right, bottom_left], egui::Stroke::new(1.2, color));
+    painter.line_segment([left, bottom_right], egui::Stroke::new(1.2_f32, color));
+    painter.line_segment([right, bottom_left], egui::Stroke::new(1.2_f32, color));
 }
 
 fn draw_piece(
@@ -615,7 +615,7 @@ fn draw_piece(
     let text_color = stroke;
     painter.circle_filled(center + egui::vec2(2.0, 3.0), radius, shadow);
     painter.circle_filled(center, radius, fill);
-    painter.circle_stroke(center, radius, egui::Stroke::new(2.0, stroke));
+    painter.circle_stroke(center, radius, egui::Stroke::new(2.0_f32, stroke));
     painter.text(
         center,
         egui::Align2::CENTER_CENTER,
