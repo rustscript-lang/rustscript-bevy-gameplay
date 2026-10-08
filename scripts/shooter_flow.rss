@@ -1,0 +1,53 @@
+use bevy;
+use math;
+
+fn clamp(value: float, low: float, high: float) -> float {
+    if value < low => { low } else => {
+        if value > high => { high } else => { value }
+    }
+}
+
+let ids: [int] = bevy::Shooter::entities();
+let count = bevy::Shooter::entity_count();
+let dt = bevy::Shooter::get(-1, "delta_ms") / 1000.0;
+let mut player = -1;
+let mut i = 0;
+while i < count {
+    let id = (&ids)[i];
+    if bevy::Shooter::text(id, "role") == "player" { player = id; }
+    i = i + 1;
+}
+if player != -1 {
+    if bevy::Shooter::get(player, "health") <= 0.0 {
+        bevy::Shooter::set(-1, "game_over", 1.0);
+    } else {
+        let mut dx = bevy::Shooter::get(-1, "input_x");
+        let mut dy = bevy::Shooter::get(-1, "input_y");
+        let length = math::sqrt(dx * dx + dy * dy);
+        if length > 0.0 { dx = dx / length; dy = dy / length; }
+        let x = clamp(bevy::Shooter::get(player, "x") + dx * 300.0 * dt, -218.0, 218.0);
+        let y = clamp(bevy::Shooter::get(player, "y") + dy * 300.0 * dt, -466.0, 400.0);
+        bevy::Shooter::set(player, "x", x);
+        bevy::Shooter::set(player, "y", y);
+        i = 0;
+        while i < count {
+            let id = (&ids)[i];
+            if bevy::Shooter::text(id, "role") == "reward" {
+                let rx = bevy::Shooter::get(id, "x") - x;
+                let ry = bevy::Shooter::get(id, "y") - y;
+                if rx * rx + ry * ry <= 42.0 * 42.0 {
+                    let kind = bevy::Shooter::text(id, "kind");
+                    let amount = bevy::Shooter::get(id, "amount");
+                    if kind == "health" || kind == "hp" {
+                        bevy::Shooter::set(player, "health", clamp(bevy::Shooter::get(player, "health") + amount, 0.0, 120.0));
+                    } else if kind == "bullets" || kind == "bullet" || kind == "ammo" {
+                        bevy::Shooter::set(player, "count", clamp(bevy::Shooter::get(player, "count") + amount, 1.0, 5.0));
+                    }
+                    bevy::Shooter::despawn(id);
+                }
+            }
+            i = i + 1;
+        }
+    }
+}
+true;

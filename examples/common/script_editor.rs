@@ -438,7 +438,7 @@ impl LiveScriptEditor {
         ui.heading("Live RustScript");
         ui.add_space(6.0);
         if cfg!(target_arch = "wasm32") {
-            ui.small("Web debugger: resumable execution on an isolated board snapshot.");
+            ui.small("Web debugger: resumable execution on an isolated world snapshot.");
         }
 
         let active = self.active.min(self.tabs.len().saturating_sub(1));

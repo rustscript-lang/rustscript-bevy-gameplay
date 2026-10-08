@@ -154,8 +154,21 @@ impl CooperativeDebugger {
                 (String::new(), 0)
             }
         };
-        let compiled =
-            compile_bevy_script(&format!("{prefix}{source}")).map_err(|err| err.to_string())?;
+        Self::from_source_snapshot(snapshot, &format!("{prefix}{source}"), invocation, offset)
+    }
+
+    /// Creates a resumable Shooter debugger using a supplied gameplay snapshot.
+    pub fn from_shooter_snapshot(snapshot: World, source: &str) -> Result<Self, String> {
+        Self::from_source_snapshot(snapshot, source, DebugInvocation::Shooter, 0)
+    }
+
+    fn from_source_snapshot(
+        snapshot: World,
+        source: &str,
+        invocation: DebugInvocation,
+        offset: u32,
+    ) -> Result<Self, String> {
+        let compiled = compile_bevy_script(source).map_err(|err| err.to_string())?;
         let mut vm = Vm::new(compiled.program.with_local_count(compiled.locals));
         bind_composed_bevy_hosts(&mut vm).map_err(|err| err.to_string())?;
         let mut jit = *vm.jit_config();
@@ -651,5 +664,46 @@ mod tests {
         .unwrap();
         paused(&debug);
         assert!(matches!(completed(&debug), Ok(DebugResult::Shooter)));
+    }
+
+    #[test]
+    fn all_shooter_tabs_resume_against_gameplay_snapshots() {
+        let mut world = World::new();
+        apply_shooter_script(&mut world, include_str!("../scripts/shooter_game.rss")).unwrap();
+        world.insert_resource(ShooterFrame(HashMap::from([
+            ("delta_ms".into(), 300.0),
+            ("input_x".into(), 1.0),
+        ])));
+        let player = world
+            .query_filtered::<Entity, With<Player>>()
+            .single(&world)
+            .unwrap();
+        let position = *world.get::<Position>(player).unwrap();
+        for source in [
+            include_str!("../scripts/shooter_game.rss"),
+            include_str!("../scripts/shooter_flow.rss"),
+            include_str!("../scripts/shooter_planes.rss"),
+            include_str!("../scripts/shooter_projectiles.rss"),
+            include_str!("../scripts/shooter_spawns.rss"),
+        ] {
+            let snapshot = snapshot_shooter_world(&mut world);
+            let debug = CooperativeDebugger::from_shooter_snapshot(snapshot, source).unwrap();
+            paused(&debug);
+            assert!(debug.snapshot().line.is_some());
+            assert!(matches!(completed(&debug), Ok(DebugResult::Shooter)));
+            assert_eq!(*world.get::<Position>(player).unwrap(), position);
+            assert_eq!(world.query::<&Enemy>().iter(&world).count(), 7);
+            assert_eq!(world.query::<&ShooterProjectile>().iter(&world).count(), 0);
+        }
+        let debug = CooperativeDebugger::from_shooter_snapshot(
+            snapshot_shooter_world(&mut world),
+            "use bevy;\nlet count = bevy::Shooter::entity_count();\ncount;",
+        )
+        .unwrap();
+        paused(&debug);
+        debug.command("break line 3");
+        debug.command("continue");
+        paused(&debug);
+        assert!(debug.command("print count").contains("Int(10)"));
     }
 }

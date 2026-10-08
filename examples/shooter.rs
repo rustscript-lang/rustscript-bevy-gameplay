@@ -1,4 +1,4 @@
-#![allow(clippy::type_complexity)]
+#![allow(clippy::type_complexity, clippy::drop_non_drop)]
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -10,17 +10,29 @@ use bevy_egui::{
     EguiContexts, EguiGlobalSettings, EguiMultipassSchedule, EguiPlugin, EguiPrimaryContextPass,
     PrimaryEguiContext, egui,
 };
-#[cfg(target_arch = "wasm32")]
-use rustscript_bevy_gameplay::cooperative_debug::{CooperativeDebugger, DebugInvocation};
 use rustscript_bevy_gameplay::{
-    AttackCooldownMs, AttackPower, AttackStyle, Enemy, Health, Player, PlayerProjectileLoadout,
-    Position, RewardItem, ScriptManagedEnemy, ShooterSpawnRules, Velocity, apply_shooter_script,
-    compile_bevy_script, tick_shooter_spawn_rules,
+    AttackPower, AttackStyle, Enemy, Health, Player, PlayerProjectileLoadout, Position, RewardItem,
+    ShooterData, ShooterEffects, ShooterFrame, ShooterProjectile, Velocity, apply_shooter_script,
+    run_shooter_frame_script,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use rustscript_bevy_gameplay::{ShooterSpawnRules, debug_shooter_script, snapshot_shooter_world};
+#[cfg(target_arch = "wasm32")]
+use rustscript_bevy_gameplay::{cooperative_debug::CooperativeDebugger, snapshot_shooter_world};
+use script_editor::{DebugSession, EditorAction, LiveScriptEditor, ScriptTab};
 use std::f32::consts::FRAC_PI_2;
-use vm::{SourceError, SourceMap, SourcePathError};
+#[cfg(not(target_arch = "wasm32"))]
+use vm::{DebugCommandBridge, Debugger};
+use web_time::Instant;
+#[path = "common/script_editor.rs"]
+#[allow(dead_code)]
+mod script_editor;
 
 const SCRIPT: &str = include_str!("../scripts/shooter_game.rss");
+const FLOW_SCRIPT: &str = include_str!("../scripts/shooter_flow.rss");
+const PLANE_SCRIPT: &str = include_str!("../scripts/shooter_planes.rss");
+const PROJECTILE_SCRIPT: &str = include_str!("../scripts/shooter_projectiles.rss");
+const SPAWN_SCRIPT: &str = include_str!("../scripts/shooter_spawns.rss");
 const LEFT: f32 = -260.0;
 const RIGHT: f32 = 260.0;
 const TOP: f32 = 520.0;
@@ -66,64 +78,45 @@ fn main() {
         return;
     }
 
-    let mut app = App::new();
-    #[cfg(target_arch = "wasm32")]
-    app.init_resource::<ShooterDebug>()
-        .add_systems(Update, poll_shooter_debug.before(apply_pending_script));
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: "RustScript Bevy Shooter".to_string(),
-            resolution: default_window_size().into(),
-            canvas: Some("#game-canvas".into()),
-            fit_canvas_to_parent: true,
-            prevent_default_event_handling: true,
+    App::new()
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "RustScript Bevy Shooter".to_string(),
+                resolution: default_window_size().into(),
+                canvas: Some("#game-canvas".into()),
+                fit_canvas_to_parent: true,
+                prevent_default_event_handling: true,
+                ..default()
+            }),
             ..default()
-        }),
-        ..default()
-    }))
-    .add_plugins(EguiPlugin::default())
-    .insert_resource(ClearColor(Color::srgb(0.055, 0.085, 0.14)))
-    .insert_resource(Score(0))
-    .insert_resource(SpawnRuleProgress::default())
-    .insert_resource(GameFlow::Running)
-    .insert_resource(ScriptEditor {
-        buffer: SCRIPT.to_string(),
-        status: "Press Save or wait one frame for initial RustScript apply".to_string(),
-        diagnostics: Vec::new(),
-        pending_save: true,
-        pending_restart: false,
-        jit_enabled: !cfg!(target_arch = "wasm32"),
-        jit_trace_count: 0,
-    })
-    .add_systems(Startup, setup)
-    .add_systems(EguiPrimaryContextPass, script_panel)
-    .add_systems(
-        Update,
-        (
-            apply_pending_script,
-            attach_render_components,
-            move_player,
-            enemy_motion,
-            player_fire,
-            enemy_fire,
-            guide_homing_projectiles,
-            apply_velocity,
-            tick_lifetimes,
-            update_shockwaves,
-            sync_positions,
-            animate_sprites,
-            animate_visual_motion,
-            collisions,
-            run_scripted_spawn_rules,
-            update_game_flow_after_health,
-            collect_rewards,
-            despawn_out_of_bounds,
+        }))
+        .add_plugins(EguiPlugin::default())
+        .insert_resource(ClearColor(Color::srgb(0.055, 0.085, 0.14)))
+        .insert_resource(Score(0))
+        .insert_resource(GameFlow::Running)
+        .insert_resource(ScriptEditor::default())
+        .add_systems(Startup, setup)
+        .add_systems(EguiPrimaryContextPass, script_panel)
+        .add_systems(
+            Update,
+            (
+                apply_pending_script,
+                attach_render_components,
+                tick_script_gameplay,
+                attach_projectile_visuals,
+                play_script_effects,
+                tick_visual_lifetimes,
+                sync_positions,
+                sync_projectile_visuals,
+                animate_sprites,
+                animate_visual_motion,
+            )
+                .chain(),
         )
-            .chain(),
-    )
-    .run();
+        .run();
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run_script_smoke() {
     let mut world = bevy_ecs::prelude::World::new();
     let summary = apply_shooter_script(&mut world, SCRIPT).expect("shooter script should apply");
@@ -145,117 +138,63 @@ fn run_script_smoke() {
         summary.jit.enabled,
         summary.jit.trace_count
     );
+    world.insert_resource(ShooterFrame(std::collections::HashMap::from([(
+        "delta_ms".into(),
+        300.0,
+    )])));
+    for source in [FLOW_SCRIPT, PLANE_SCRIPT, PROJECTILE_SCRIPT, SPAWN_SCRIPT] {
+        run_shooter_frame_script(&mut world, source).expect("shooter gameplay RSS");
+    }
+    println!(
+        "runtime_projectiles={}, rss_tabs=5",
+        world.query::<&ShooterProjectile>().iter(&world).count()
+    );
 }
 
 #[derive(Resource)]
 struct ScriptEditor {
-    buffer: String,
-    status: String,
-    diagnostics: Vec<ScriptDiagnostic>,
+    editor: LiveScriptEditor,
+    debug_session: Option<DebugSession>,
+    debug_previous_flow: Option<GameFlow>,
     pending_save: bool,
     pending_restart: bool,
+    last_initial_source: String,
+    status: String,
     jit_enabled: bool,
     jit_trace_count: usize,
 }
 
-#[cfg(target_arch = "wasm32")]
-#[derive(Resource, Default)]
-struct ShooterDebug {
-    session: Option<CooperativeDebugger>,
-    source: Option<String>,
-    commands: Vec<String>,
-    stop: bool,
-    running: bool,
-    finished: bool,
-    line: Option<u32>,
-    output: String,
-    breakpoint: u32,
-    console: String,
-}
-
-#[cfg(target_arch = "wasm32")]
-fn poll_shooter_debug(world: &mut World) {
-    let Some(mut debug) = world.remove_resource::<ShooterDebug>() else {
-        return;
-    };
-    if debug.stop {
-        debug.session = None;
-        debug.stop = false;
-        debug.commands.clear();
-        debug.source = None;
-        debug.running = false;
-        debug.finished = false;
-        debug.line = None;
-        debug.output = "debug session stopped".to_string();
-    }
-    if let Some(source) = debug.source.take() {
-        match CooperativeDebugger::new(world, &source, DebugInvocation::Shooter) {
-            Ok(session) => {
-                debug.session = Some(session);
-                debug.output.clear();
-            }
-            Err(error) => {
-                debug.output = format!("debug error: {error}");
-            }
+impl Default for ScriptEditor {
+    fn default() -> Self {
+        let mut editor = LiveScriptEditor::new(vec![
+            ScriptTab::new("shooter_game.rss", SCRIPT, "", SHOOTER_HOST_APIS),
+            ScriptTab::new("shooter_flow.rss", FLOW_SCRIPT, "", SHOOTER_HOST_APIS),
+            ScriptTab::new("shooter_planes.rss", PLANE_SCRIPT, "", SHOOTER_HOST_APIS),
+            ScriptTab::new(
+                "shooter_projectiles.rss",
+                PROJECTILE_SCRIPT,
+                "",
+                SHOOTER_HOST_APIS,
+            ),
+            ScriptTab::new("shooter_spawns.rss", SPAWN_SCRIPT, "", SHOOTER_HOST_APIS),
+        ]);
+        editor.lint_all();
+        Self {
+            editor,
+            debug_session: None,
+            debug_previous_flow: None,
+            pending_save: true,
+            pending_restart: false,
+            status: "Initializing RSS gameplay".into(),
+            last_initial_source: String::new(),
+            jit_enabled: !cfg!(target_arch = "wasm32"),
+            jit_trace_count: 0,
         }
-    }
-    if let Some(session) = &debug.session {
-        for command in std::mem::take(&mut debug.commands) {
-            session.command(&command);
-        }
-        session.advance();
-        let snapshot = session.snapshot();
-        debug.running = snapshot.running;
-        debug.finished = snapshot.finished;
-        debug.line = snapshot.line;
-        debug.output = snapshot.output;
-    }
-    world.insert_resource(debug);
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ScriptDiagnostic {
-    line: usize,
-    start_col: usize,
-    end_col: usize,
-    message: String,
-    source_line: String,
-    start_byte: usize,
-    end_byte: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScriptTokenKind {
-    Keyword,
-    Type,
-    Number,
-    String,
-    Comment,
-    Function,
-    HostApi,
-    Operator,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ScriptToken {
-    start: usize,
-    end: usize,
-    kind: ScriptTokenKind,
-}
-
-impl ScriptToken {
-    fn text(self, source: &str) -> &str {
-        &source[self.start..self.end]
     }
 }
 
 #[derive(Resource, Deref, DerefMut)]
 struct Score(u32);
-
-#[derive(Resource, Default)]
-struct SpawnRuleProgress {
-    last_score: u32,
-}
 
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
 enum GameFlow {
@@ -278,15 +217,6 @@ impl GameFlow {
     }
 }
 
-const SCRIPT_KEYWORDS: &[&str] = &[
-    "as", "break", "continue", "else", "false", "fn", "for", "if", "let", "match", "mut", "null",
-    "pub", "return", "struct", "true", "use", "while",
-];
-
-const SCRIPT_TYPES: &[&str] = &[
-    "array", "bool", "bytes", "float", "int", "map", "number", "string",
-];
-
 const SHOOTER_HOST_APIS: &[&str] = &[
     "bevy::Shooter::set_player_health",
     "bevy::Shooter::set_player_attack",
@@ -296,413 +226,21 @@ const SHOOTER_HOST_APIS: &[&str] = &[
     "bevy::Shooter::spawn_enemy_every",
     "bevy::Shooter::spawn_reward_every",
     "bevy::Shooter::spawn_enemy_after_kills",
+    "bevy::Shooter::entities",
+    "bevy::Shooter::entity_count",
+    "bevy::Shooter::get",
+    "bevy::Shooter::set",
+    "bevy::Shooter::text",
+    "bevy::Shooter::projectile",
+    "bevy::Shooter::reward",
+    "bevy::Shooter::despawn",
+    "bevy::Shooter::mark_hit",
+    "bevy::Shooter::effect",
+    "bevy::Shooter::rule_count",
+    "bevy::Shooter::rule_get",
+    "bevy::Shooter::rule_set",
+    "bevy::Shooter::rule_spawn",
 ];
-
-fn rustscript_highlight_tokens(source: &str) -> Vec<ScriptToken> {
-    let mut tokens = Vec::new();
-    let bytes = source.as_bytes();
-    let mut cursor = 0usize;
-
-    while cursor < bytes.len() {
-        let ch = bytes[cursor] as char;
-        if ch.is_ascii_whitespace() {
-            cursor += 1;
-            continue;
-        }
-
-        if source[cursor..].starts_with("//") {
-            let end = source[cursor..]
-                .find('\n')
-                .map(|offset| cursor + offset)
-                .unwrap_or(source.len());
-            tokens.push(ScriptToken {
-                start: cursor,
-                end,
-                kind: ScriptTokenKind::Comment,
-            });
-            cursor = end;
-            continue;
-        }
-
-        if source[cursor..].starts_with("/*") {
-            let end = source[cursor + 2..]
-                .find("*/")
-                .map(|offset| cursor + 2 + offset + 2)
-                .unwrap_or(source.len());
-            tokens.push(ScriptToken {
-                start: cursor,
-                end,
-                kind: ScriptTokenKind::Comment,
-            });
-            cursor = end;
-            continue;
-        }
-
-        if ch == '"' || source[cursor..].starts_with("b\"") {
-            let start = cursor;
-            if source[cursor..].starts_with("b\"") {
-                cursor += 2;
-            } else {
-                cursor += 1;
-            }
-            let mut escaped = false;
-            while cursor < bytes.len() {
-                let current = bytes[cursor] as char;
-                cursor += 1;
-                if escaped {
-                    escaped = false;
-                    continue;
-                }
-                if current == '\\' {
-                    escaped = true;
-                    continue;
-                }
-                if current == '"' {
-                    break;
-                }
-            }
-            tokens.push(ScriptToken {
-                start,
-                end: cursor,
-                kind: ScriptTokenKind::String,
-            });
-            continue;
-        }
-
-        if ch.is_ascii_digit() {
-            let start = cursor;
-            cursor += 1;
-            while cursor < bytes.len() {
-                let current = bytes[cursor] as char;
-                if current.is_ascii_digit() || current == '.' {
-                    cursor += 1;
-                } else {
-                    break;
-                }
-            }
-            tokens.push(ScriptToken {
-                start,
-                end: cursor,
-                kind: ScriptTokenKind::Number,
-            });
-            continue;
-        }
-
-        if is_ident_start(ch) {
-            let start = cursor;
-            cursor += 1;
-            while cursor < bytes.len() {
-                let current = bytes[cursor] as char;
-                if is_ident_continue(current) {
-                    cursor += 1;
-                    continue;
-                }
-                if source[cursor..].starts_with("::") {
-                    cursor += 2;
-                    continue;
-                }
-                break;
-            }
-            let text = &source[start..cursor];
-            let kind = if SHOOTER_HOST_APIS.contains(&text) {
-                Some(ScriptTokenKind::HostApi)
-            } else if SCRIPT_KEYWORDS.contains(&text) {
-                Some(ScriptTokenKind::Keyword)
-            } else if SCRIPT_TYPES.contains(&text) {
-                Some(ScriptTokenKind::Type)
-            } else if next_non_ws_starts_with(source, cursor, '(') {
-                Some(ScriptTokenKind::Function)
-            } else {
-                None
-            };
-            if let Some(kind) = kind {
-                tokens.push(ScriptToken {
-                    start,
-                    end: cursor,
-                    kind,
-                });
-            }
-            continue;
-        }
-
-        if "=+-*/%<>!&|?:;,.(){}[]".contains(ch) {
-            tokens.push(ScriptToken {
-                start: cursor,
-                end: cursor + 1,
-                kind: ScriptTokenKind::Operator,
-            });
-        }
-        cursor += 1;
-    }
-
-    tokens
-}
-
-fn is_ident_start(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphabetic()
-}
-
-fn is_ident_continue(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphanumeric()
-}
-
-fn next_non_ws_starts_with(source: &str, cursor: usize, needle: char) -> bool {
-    source[cursor..]
-        .chars()
-        .find(|ch| !ch.is_ascii_whitespace())
-        == Some(needle)
-}
-
-fn script_compile_diagnostics(source: &str, fallback_error: &str) -> Vec<ScriptDiagnostic> {
-    match compile_bevy_script(source) {
-        Ok(_) => {
-            if fallback_error.trim().is_empty() {
-                Vec::new()
-            } else {
-                vec![fallback_script_diagnostic(source, fallback_error)]
-            }
-        }
-        Err(
-            SourcePathError::Source(SourceError::Parse(err))
-            | SourcePathError::SourceWithMap {
-                error: SourceError::Parse(err),
-                ..
-            },
-        ) => {
-            let mut source_map = SourceMap::new();
-            let source_id = source_map.add_source("<editor>", source.to_string());
-            let err = err.with_line_span_from_source(&source_map, source_id);
-            let line = preferred_parse_diagnostic_line(source, err.line.max(1), &err.message);
-            let span = if line == err.line {
-                err.span.or_else(|| source_map.line_span(source_id, line))
-            } else {
-                source_map.line_span(source_id, line)
-            };
-            vec![script_diagnostic_from_parts(
-                &source_map,
-                source_id,
-                line,
-                span.map(|span| (span.lo, span.hi)),
-                err.message,
-            )]
-        }
-        Err(
-            SourcePathError::Source(SourceError::Compile(err))
-            | SourcePathError::SourceWithMap {
-                error: SourceError::Compile(err),
-                ..
-            },
-        ) => {
-            let mut source_map = SourceMap::new();
-            let source_id = source_map.add_source("<editor>", source.to_string());
-            let line = err.line().unwrap_or(1).max(1);
-            let span = source_map.line_span(source_id, line);
-            vec![script_diagnostic_from_parts(
-                &source_map,
-                source_id,
-                line,
-                span.map(|span| (span.lo, span.hi)),
-                err.diagnostic_message(),
-            )]
-        }
-        Err(other) => vec![fallback_script_diagnostic(source, &other.to_string())],
-    }
-}
-
-fn preferred_parse_diagnostic_line(source: &str, reported_line: usize, message: &str) -> usize {
-    if reported_line <= 1 || !message.contains("expected") {
-        return reported_line;
-    }
-
-    let Some(previous_line) = source.lines().nth(reported_line - 2) else {
-        return reported_line;
-    };
-    if previous_line.matches('(').count() > previous_line.matches(')').count() {
-        return reported_line - 1;
-    }
-    reported_line
-}
-
-fn script_diagnostic_from_parts(
-    source_map: &SourceMap,
-    source_id: u32,
-    line: usize,
-    span: Option<(usize, usize)>,
-    message: String,
-) -> ScriptDiagnostic {
-    let source_line = source_map
-        .file(source_id)
-        .and_then(|file| file.line_text(line))
-        .unwrap_or_default()
-        .to_string();
-    let (start_byte, end_byte) = span.unwrap_or_else(|| {
-        source_map
-            .line_span(source_id, line)
-            .map(|span| (span.lo, span.hi))
-            .unwrap_or((0, 0))
-    });
-    let (start_line, start_col) = source_map
-        .line_col_for_offset(source_id, start_byte)
-        .unwrap_or((line, 1));
-    let (_, end_col) = source_map
-        .line_col_for_offset(source_id, end_byte)
-        .unwrap_or((start_line, start_col + 1));
-    ScriptDiagnostic {
-        line: start_line,
-        start_col,
-        end_col: end_col.max(start_col + 1),
-        message,
-        source_line,
-        start_byte,
-        end_byte: end_byte.max(start_byte + 1),
-    }
-}
-
-fn fallback_script_diagnostic(source: &str, fallback_error: &str) -> ScriptDiagnostic {
-    let line = parse_line_number(fallback_error).unwrap_or(1);
-    let source_line = source
-        .lines()
-        .nth(line.saturating_sub(1))
-        .unwrap_or_default()
-        .to_string();
-    let start_byte = line_start_byte(source, line).unwrap_or(0);
-    let end_byte = start_byte + source_line.len();
-    ScriptDiagnostic {
-        line,
-        start_col: 1,
-        end_col: source_line.chars().count().max(1) + 1,
-        message: fallback_error.to_string(),
-        source_line,
-        start_byte,
-        end_byte: end_byte.max(start_byte + 1),
-    }
-}
-
-fn parse_line_number(text: &str) -> Option<usize> {
-    let marker = "line ";
-    let start = text.find(marker)? + marker.len();
-    let digits = text[start..]
-        .chars()
-        .take_while(|ch| ch.is_ascii_digit())
-        .collect::<String>();
-    digits.parse().ok()
-}
-
-fn line_start_byte(source: &str, line: usize) -> Option<usize> {
-    if line == 0 {
-        return None;
-    }
-    if line == 1 {
-        return Some(0);
-    }
-    let mut current_line = 1usize;
-    for (index, ch) in source.char_indices() {
-        if ch == '\n' {
-            current_line += 1;
-            if current_line == line {
-                return Some(index + 1);
-            }
-        }
-    }
-    None
-}
-
-fn rustscript_layout_job(source: &str, diagnostics: &[ScriptDiagnostic]) -> egui::text::LayoutJob {
-    let mut job = egui::text::LayoutJob::default();
-    let mut cursor = 0usize;
-    for token in rustscript_highlight_tokens(source) {
-        if cursor < token.start {
-            append_script_text(
-                &mut job,
-                &source[cursor..token.start],
-                plain_format(diagnostics),
-            );
-        }
-        append_script_text(
-            &mut job,
-            token.text(source),
-            token_format(token.kind, token.start, token.end, diagnostics),
-        );
-        cursor = token.end;
-    }
-    if cursor < source.len() {
-        append_script_text(&mut job, &source[cursor..], plain_format(diagnostics));
-    }
-    job
-}
-
-fn append_script_text(job: &mut egui::text::LayoutJob, text: &str, format: egui::TextFormat) {
-    job.append(text, 0.0, format);
-}
-
-fn token_format(
-    kind: ScriptTokenKind,
-    start: usize,
-    end: usize,
-    diagnostics: &[ScriptDiagnostic],
-) -> egui::TextFormat {
-    let mut format = plain_format(diagnostics);
-    format.color = match kind {
-        ScriptTokenKind::Keyword => egui::Color32::from_rgb(117, 190, 255),
-        ScriptTokenKind::Type => egui::Color32::from_rgb(106, 214, 179),
-        ScriptTokenKind::Number => egui::Color32::from_rgb(255, 206, 112),
-        ScriptTokenKind::String => egui::Color32::from_rgb(245, 155, 112),
-        ScriptTokenKind::Comment => egui::Color32::from_rgb(130, 148, 166),
-        ScriptTokenKind::Function => egui::Color32::from_rgb(209, 184, 255),
-        ScriptTokenKind::HostApi => egui::Color32::from_rgb(120, 230, 238),
-        ScriptTokenKind::Operator => egui::Color32::from_rgb(182, 192, 210),
-    };
-    if diagnostics
-        .iter()
-        .any(|diagnostic| ranges_overlap(start, end, diagnostic.start_byte, diagnostic.end_byte))
-    {
-        format.background = egui::Color32::from_rgba_unmultiplied(120, 24, 36, 115);
-    }
-    format
-}
-
-fn plain_format(diagnostics: &[ScriptDiagnostic]) -> egui::TextFormat {
-    let _ = diagnostics;
-    egui::TextFormat {
-        font_id: egui::FontId::monospace(13.0),
-        color: egui::Color32::from_rgb(220, 228, 238),
-        ..Default::default()
-    }
-}
-
-fn ranges_overlap(a_start: usize, a_end: usize, b_start: usize, b_end: usize) -> bool {
-    a_start < b_end && b_start < a_end
-}
-
-fn render_script_diagnostics(ui: &mut egui::Ui, diagnostics: &[ScriptDiagnostic]) {
-    if diagnostics.is_empty() {
-        return;
-    }
-
-    ui.add_space(6.0);
-    for diagnostic in diagnostics {
-        ui.colored_label(
-            egui::Color32::from_rgb(255, 120, 135),
-            format!(
-                "line {}:{} {}",
-                diagnostic.line, diagnostic.start_col, diagnostic.message
-            ),
-        );
-        ui.monospace(format!(
-            "{:>3} | {}",
-            diagnostic.line, diagnostic.source_line
-        ));
-        let pointer_width = diagnostic
-            .end_col
-            .saturating_sub(diagnostic.start_col)
-            .max(1);
-        ui.monospace(format!(
-            "    | {}{}",
-            " ".repeat(diagnostic.start_col.saturating_sub(1)),
-            "^".repeat(pointer_width)
-        ));
-    }
-}
 
 #[derive(Resource, Clone)]
 struct ShooterAssets {
@@ -1021,25 +559,10 @@ struct HitEffect;
 #[derive(Component)]
 struct ExplosionEffect;
 
-#[derive(Component)]
-struct PlayerBullet;
-
-#[derive(Component)]
-struct EnemyBullet;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProjectileOwner {
     Player,
     Enemy,
-}
-
-impl ProjectileOwner {
-    fn forward_sign(self) -> f32 {
-        match self {
-            ProjectileOwner::Player => 1.0,
-            ProjectileOwner::Enemy => -1.0,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1054,43 +577,11 @@ enum ProjectileKind {
     Rail,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct ProjectileShot {
-    kind: ProjectileKind,
-    damage: i64,
-    velocity: Vec2,
-}
-
-#[derive(Component)]
-struct Projectile {
-    owner: ProjectileOwner,
-    damage: i64,
-    radius: f32,
-    pierces: bool,
-}
-
-#[derive(Component)]
-struct Homing {
-    speed: f32,
-    turn_rate: f32,
-}
-
 #[derive(Component)]
 struct Lifetime {
     elapsed_ms: f32,
     duration_ms: f32,
 }
-
-#[derive(Component)]
-struct Shockwave {
-    start_radius: f32,
-    end_radius: f32,
-    start_scale: f32,
-    end_scale: f32,
-}
-
-#[derive(Component, Default)]
-struct HitTargets(Vec<Entity>);
 
 #[derive(Component)]
 struct SpriteFrames {
@@ -1119,36 +610,6 @@ struct VisualMotion {
     phase: f32,
 }
 
-#[derive(Component)]
-struct EnemyManeuver {
-    elapsed_secs: f32,
-    anchor_x: f32,
-}
-
-impl EnemyManeuver {
-    fn new(anchor_x: f32) -> Self {
-        Self {
-            elapsed_secs: 0.0,
-            anchor_x,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct EnemyMotionProfile {
-    descent_speed: f32,
-    lateral_speed: f32,
-    secondary_lateral_speed: f32,
-    frequency: f32,
-    phase: f32,
-    drift_speed: f32,
-}
-
-#[derive(Component)]
-struct FireClock {
-    elapsed_ms: f32,
-}
-
 type AddedEnemyQuery<'w, 's> =
     Query<'w, 's, (Entity, &'static Enemy, &'static Position), (Added<Enemy>, Without<EnemyShip>)>;
 type AddedRewardQuery<'w, 's> = Query<
@@ -1157,12 +618,6 @@ type AddedRewardQuery<'w, 's> = Query<
     (Entity, &'static RewardItem, &'static Position),
     (Added<RewardItem>, Without<RewardPickup>),
 >;
-type BulletPositionQuery<'w, 's> = Query<'w, 's, (Entity, &'static Position), With<Projectile>>;
-type MovingProjectileQuery<'w, 's> =
-    Query<'w, 's, (&'static Velocity, &'static mut Position), With<Projectile>>;
-type ScriptManagedEnemyPositionQuery<'w, 's> =
-    Query<'w, 's, (Entity, &'static Position), (With<Enemy>, With<ScriptManagedEnemy>)>;
-
 fn setup(
     mut commands: Commands,
     mut egui_global_settings: ResMut<EguiGlobalSettings>,
@@ -1223,48 +678,41 @@ fn spawn_starfield(commands: &mut Commands, assets: &ShooterAssets) {
 }
 
 fn apply_pending_script(world: &mut World) {
-    let Some((source, restart)) = ({
-        let mut editor = world.resource_mut::<ScriptEditor>();
-        if editor.pending_restart {
-            editor.pending_restart = false;
-            editor.pending_save = false;
-            Some((editor.buffer.clone(), true))
-        } else if editor.pending_save {
-            editor.pending_save = false;
-            Some((editor.buffer.clone(), false))
-        } else {
-            None
+    let (source, restart) = {
+        let mut scripts = world.resource_mut::<ScriptEditor>();
+        if !scripts.pending_save && !scripts.pending_restart {
+            return;
         }
-    }) else {
-        return;
+        let restart = scripts.pending_restart;
+        scripts.pending_save = false;
+        scripts.pending_restart = false;
+        let source = scripts.editor.active_source(0).to_owned();
+        scripts.last_initial_source = source.clone();
+        (source, restart)
     };
-
     let result = if restart {
         restart_gameplay(world, &source)
     } else {
         apply_shooter_script(world, &source)
     };
     if result.is_ok() {
-        reset_spawn_rule_progress(world);
+        world
+            .get_resource_or_insert_with(ShooterFrame::default)
+            .0
+            .insert("kills_delta".into(), 0.0);
     }
-    let mut editor = world.resource_mut::<ScriptEditor>();
+    let mut scripts = world.resource_mut::<ScriptEditor>();
     match result {
         Ok(summary) => {
-            let verb = if restart { "Restarted" } else { "Applied live" };
-            editor.diagnostics.clear();
-            editor.jit_enabled = summary.jit.enabled;
-            editor.jit_trace_count = summary.jit.trace_count;
-            editor.status = format!(
-                "{verb}: hp {}, attack {} / power {}, enemies {}",
-                summary.player_health,
-                summary.player_attack_style,
-                summary.player_attack_power,
-                summary.enemies_spawned
+            scripts.jit_enabled = summary.jit.enabled;
+            scripts.jit_trace_count = summary.jit.trace_count;
+            scripts.status = format!(
+                "Applied: hp {}, enemies {}",
+                summary.player_health, summary.enemies_spawned
             );
         }
-        Err(err) => {
-            editor.diagnostics = script_compile_diagnostics(&source, &err);
-            editor.status = "RustScript has diagnostics below".to_string();
+        Err(error) => {
+            scripts.status = error;
         }
     }
 }
@@ -1273,35 +721,18 @@ fn restart_gameplay(
     world: &mut World,
     source: &str,
 ) -> Result<rustscript_bevy_gameplay::ShooterSummary, String> {
-    despawn_entities_with::<Projectile>(world);
+    rustscript_bevy_gameplay::compile_bevy_script(source).map_err(|err| err.to_string())?;
+    despawn_entities_with::<ShooterProjectile>(world);
     despawn_entities_with::<Enemy>(world);
     despawn_entities_with::<RewardItem>(world);
+    despawn_entities_with::<HitEffect>(world);
+    despawn_entities_with::<ExplosionEffect>(world);
     reset_player_runtime(world);
-
-    if let Some(mut score) = world.get_resource_mut::<Score>() {
-        score.0 = 0;
-    } else {
-        world.insert_resource(Score(0));
-    }
-    if let Some(mut flow) = world.get_resource_mut::<GameFlow>() {
-        *flow = GameFlow::Running;
-    } else {
-        world.insert_resource(GameFlow::Running);
-    }
-
+    world.insert_resource(Score(0));
+    world.insert_resource(GameFlow::Running);
+    world.insert_resource(ShooterFrame::default());
+    world.insert_resource(ShooterEffects::default());
     apply_shooter_script(world, source)
-}
-
-fn reset_spawn_rule_progress(world: &mut World) {
-    let score = world
-        .get_resource::<Score>()
-        .map(|score| score.0)
-        .unwrap_or(0);
-    if let Some(mut progress) = world.get_resource_mut::<SpawnRuleProgress>() {
-        progress.last_score = score;
-    } else {
-        world.insert_resource(SpawnRuleProgress { last_score: score });
-    }
 }
 
 fn despawn_entities_with<T: Component>(world: &mut World) {
@@ -1328,9 +759,7 @@ fn reset_player_runtime(world: &mut World) {
             velocity.x = 0.0;
             velocity.y = 0.0;
         }
-        if let Some(mut clock) = world.get_mut::<FireClock>(entity) {
-            clock.elapsed_ms = 0.0;
-        }
+        world.entity_mut(entity).remove::<ShooterData>();
     }
 }
 
@@ -1351,7 +780,6 @@ fn attach_render_components(
                 rotation: Quat::default(),
             },
             PlayerShip,
-            FireClock { elapsed_ms: 0.0 },
         ));
     }
 
@@ -1367,8 +795,6 @@ fn attach_render_components(
                 rotation: Quat::default(),
             },
             EnemyShip,
-            FireClock { elapsed_ms: 0.0 },
-            EnemyManeuver::new(position.x),
         ));
     }
 
@@ -1397,664 +823,6 @@ fn attach_render_components(
                 phase: 0.8,
             },
         ));
-    }
-}
-
-fn move_player(
-    input: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
-    flow: Res<GameFlow>,
-    mut query: Query<(&Health, &mut Position), With<Player>>,
-) {
-    if !flow.is_running() {
-        return;
-    }
-
-    let mut direction = Vec2::ZERO;
-    if input.pressed(KeyCode::ArrowLeft) || input.pressed(KeyCode::KeyA) {
-        direction.x -= 1.0;
-    }
-    if input.pressed(KeyCode::ArrowRight) || input.pressed(KeyCode::KeyD) {
-        direction.x += 1.0;
-    }
-    if input.pressed(KeyCode::ArrowUp) || input.pressed(KeyCode::KeyW) {
-        direction.y += 1.0;
-    }
-    if input.pressed(KeyCode::ArrowDown) || input.pressed(KeyCode::KeyS) {
-        direction.y -= 1.0;
-    }
-    if direction.length_squared() > 0.0 {
-        direction = direction.normalize();
-    }
-    for (health, mut position) in &mut query {
-        if health.0 <= 0 {
-            continue;
-        }
-        position.x =
-            (position.x + direction.x * 300.0 * time.delta_secs()).clamp(LEFT + 42.0, RIGHT - 42.0);
-        position.y = (position.y + direction.y * 300.0 * time.delta_secs())
-            .clamp(BOTTOM + 54.0, TOP - 120.0);
-    }
-}
-
-fn enemy_motion(
-    time: Res<Time>,
-    flow: Res<GameFlow>,
-    mut query: Query<
-        (
-            &Enemy,
-            &AttackStyle,
-            &mut Position,
-            &mut Velocity,
-            Option<&mut EnemyManeuver>,
-        ),
-        With<Enemy>,
-    >,
-) {
-    if !flow.is_running() {
-        return;
-    }
-
-    for (enemy, style, mut position, mut velocity, maneuver) in &mut query {
-        let profile = enemy_motion_profile(enemy.kind.as_str(), style.0.as_str());
-        let mut elapsed_secs = time.elapsed_secs();
-        let mut anchor_x = position.x;
-        if let Some(mut maneuver) = maneuver {
-            maneuver.elapsed_secs += time.delta_secs();
-            elapsed_secs = maneuver.elapsed_secs;
-            anchor_x = maneuver.anchor_x;
-        }
-        let weave = (elapsed_secs * profile.frequency + profile.phase + anchor_x * 0.011).sin();
-        let counter = (elapsed_secs * profile.frequency * 0.47 + profile.phase * 0.5).cos();
-        let dive = if enemy.kind == "striker" {
-            (elapsed_secs * 4.0 + profile.phase).sin().max(0.0) * 34.0
-        } else {
-            0.0
-        };
-
-        velocity.x = profile.drift_speed
-            + weave * profile.lateral_speed
-            + counter * profile.secondary_lateral_speed;
-        velocity.y = -(profile.descent_speed + dive);
-        position.y += velocity.y * time.delta_secs();
-        position.x = (position.x + velocity.x * time.delta_secs()).clamp(LEFT + 32.0, RIGHT - 32.0);
-    }
-}
-
-fn enemy_motion_profile(kind: &str, style: &str) -> EnemyMotionProfile {
-    let mut profile = match kind {
-        "bomber" => EnemyMotionProfile {
-            descent_speed: 42.0,
-            lateral_speed: 44.0,
-            secondary_lateral_speed: 10.0,
-            frequency: 1.15,
-            phase: 0.9,
-            drift_speed: -8.0,
-        },
-        "weaver" | "ace" => EnemyMotionProfile {
-            descent_speed: 48.0,
-            lateral_speed: 92.0,
-            secondary_lateral_speed: 22.0,
-            frequency: 2.8,
-            phase: 1.8,
-            drift_speed: 0.0,
-        },
-        "tank" => EnemyMotionProfile {
-            descent_speed: 30.0,
-            lateral_speed: 8.0,
-            secondary_lateral_speed: 0.0,
-            frequency: 0.8,
-            phase: 2.4,
-            drift_speed: 0.0,
-        },
-        "sniper" => EnemyMotionProfile {
-            descent_speed: 34.0,
-            lateral_speed: 118.0,
-            secondary_lateral_speed: 18.0,
-            frequency: 0.95,
-            phase: 0.35,
-            drift_speed: 0.0,
-        },
-        "carrier" => EnemyMotionProfile {
-            descent_speed: 36.0,
-            lateral_speed: 58.0,
-            secondary_lateral_speed: 28.0,
-            frequency: 1.45,
-            phase: 2.1,
-            drift_speed: 6.0,
-        },
-        "striker" => EnemyMotionProfile {
-            descent_speed: 82.0,
-            lateral_speed: 70.0,
-            secondary_lateral_speed: 26.0,
-            frequency: 2.35,
-            phase: 1.25,
-            drift_speed: 18.0,
-        },
-        "boss" => EnemyMotionProfile {
-            descent_speed: 22.0,
-            lateral_speed: 76.0,
-            secondary_lateral_speed: 34.0,
-            frequency: 0.62,
-            phase: 2.8,
-            drift_speed: 0.0,
-        },
-        _ => EnemyMotionProfile {
-            descent_speed: 58.0,
-            lateral_speed: 28.0,
-            secondary_lateral_speed: 8.0,
-            frequency: 1.8,
-            phase: 0.15,
-            drift_speed: 0.0,
-        },
-    };
-
-    match style {
-        "burst" => {
-            profile.descent_speed += 10.0;
-            profile.frequency *= 0.88;
-        }
-        "wave" => {
-            profile.descent_speed = (profile.descent_speed - 5.0).max(18.0);
-            profile.lateral_speed += 28.0;
-            profile.frequency *= 1.18;
-        }
-        "missile" | "homing" => {
-            profile.descent_speed -= 3.0;
-            profile.drift_speed += 10.0;
-        }
-        "rail" | "laser" => {
-            profile.descent_speed -= 6.0;
-            profile.lateral_speed += 18.0;
-        }
-        _ => {}
-    }
-
-    profile
-}
-
-fn player_fire(
-    mut commands: Commands,
-    assets: Res<ShooterAssets>,
-    time: Res<Time>,
-    flow: Res<GameFlow>,
-    mut query: Query<
-        (
-            &Position,
-            &AttackStyle,
-            &AttackPower,
-            &AttackCooldownMs,
-            &PlayerProjectileLoadout,
-            &Health,
-            &mut FireClock,
-        ),
-        With<Player>,
-    >,
-) {
-    if !flow.is_running() {
-        return;
-    }
-
-    for (position, style, power, cooldown, loadout, health, mut clock) in &mut query {
-        if health.0 <= 0 {
-            continue;
-        }
-        clock.elapsed_ms += time.delta_secs() * 1000.0;
-        if clock.elapsed_ms < cooldown.0 as f32 {
-            continue;
-        }
-        clock.elapsed_ms = 0.0;
-        for shot in projectile_plan(
-            ProjectileOwner::Player,
-            style.0.as_str(),
-            power.0,
-            Some(loadout),
-        ) {
-            spawn_projectile(
-                &mut commands,
-                &assets,
-                ProjectileOwner::Player,
-                *position,
-                shot,
-            );
-        }
-    }
-}
-
-fn enemy_fire(
-    mut commands: Commands,
-    assets: Res<ShooterAssets>,
-    time: Res<Time>,
-    flow: Res<GameFlow>,
-    mut query: Query<(
-        &Enemy,
-        &Position,
-        &AttackStyle,
-        &AttackPower,
-        &mut FireClock,
-    )>,
-) {
-    if !flow.is_running() {
-        return;
-    }
-
-    for (enemy, position, style, power, mut clock) in &mut query {
-        clock.elapsed_ms += time.delta_secs() * 1000.0;
-        let cooldown = enemy_fire_cooldown_ms(enemy.kind.as_str(), style.0.as_str());
-        if clock.elapsed_ms < cooldown {
-            continue;
-        }
-        clock.elapsed_ms = 0.0;
-        for shot in enemy_projectile_plan(enemy.kind.as_str(), style.0.as_str(), power.0) {
-            spawn_projectile(
-                &mut commands,
-                &assets,
-                ProjectileOwner::Enemy,
-                *position,
-                shot,
-            );
-        }
-    }
-}
-
-fn enemy_fire_cooldown_ms(kind: &str, style: &str) -> f32 {
-    match kind {
-        "sniper" => 1850.0,
-        "striker" => 980.0,
-        "carrier" => 1350.0,
-        _ if style == "burst" => 1200.0,
-        _ => 1500.0,
-    }
-}
-
-fn projectile_plan(
-    owner: ProjectileOwner,
-    style: &str,
-    power: i64,
-    loadout: Option<&PlayerProjectileLoadout>,
-) -> Vec<ProjectileShot> {
-    if owner == ProjectileOwner::Player {
-        let kind = loadout.map(|value| value.kind.as_str()).unwrap_or(style);
-        let count = loadout.map(|value| value.count).unwrap_or(1);
-        return player_projectile_plan(kind, count, power);
-    }
-
-    enemy_projectile_plan("", style, power)
-}
-
-fn enemy_projectile_plan(kind: &str, style: &str, power: i64) -> Vec<ProjectileShot> {
-    let enemy_sign = ProjectileOwner::Enemy.forward_sign();
-    match kind {
-        "sniper" => {
-            return vec![ProjectileShot {
-                kind: ProjectileKind::Rail,
-                damage: power + 12,
-                velocity: Vec2::new(0.0, 900.0 * enemy_sign),
-            }];
-        }
-        "carrier" => {
-            return vec![
-                ProjectileShot {
-                    kind: ProjectileKind::HomingMissile,
-                    damage: power + 7,
-                    velocity: Vec2::new(-45.0, 340.0 * enemy_sign),
-                },
-                ProjectileShot {
-                    kind: ProjectileKind::Plasma,
-                    damage: power + 5,
-                    velocity: Vec2::new(45.0, 430.0 * enemy_sign),
-                },
-            ];
-        }
-        "striker" => {
-            return vec![
-                ProjectileShot {
-                    kind: ProjectileKind::Flak,
-                    damage: power,
-                    velocity: Vec2::new(-110.0, 640.0 * enemy_sign),
-                },
-                ProjectileShot {
-                    kind: ProjectileKind::Flak,
-                    damage: power,
-                    velocity: Vec2::new(0.0, 700.0 * enemy_sign),
-                },
-                ProjectileShot {
-                    kind: ProjectileKind::Flak,
-                    damage: power,
-                    velocity: Vec2::new(110.0, 640.0 * enemy_sign),
-                },
-            ];
-        }
-        _ => {}
-    }
-
-    match style {
-        "spread" => vec![
-            ProjectileShot {
-                kind: ProjectileKind::Spread,
-                damage: power,
-                velocity: Vec2::new(-90.0, 460.0 * enemy_sign),
-            },
-            ProjectileShot {
-                kind: ProjectileKind::Spread,
-                damage: power,
-                velocity: Vec2::new(0.0, 500.0 * enemy_sign),
-            },
-            ProjectileShot {
-                kind: ProjectileKind::Spread,
-                damage: power,
-                velocity: Vec2::new(90.0, 460.0 * enemy_sign),
-            },
-            ProjectileShot {
-                kind: ProjectileKind::HomingMissile,
-                damage: power + 5,
-                velocity: Vec2::new(0.0, 330.0 * enemy_sign),
-            },
-            ProjectileShot {
-                kind: ProjectileKind::Shockwave,
-                damage: (power / 2).max(4),
-                velocity: Vec2::ZERO,
-            },
-        ],
-        "laser" => vec![
-            ProjectileShot {
-                kind: ProjectileKind::Laser,
-                damage: power * 2,
-                velocity: Vec2::new(0.0, 760.0 * enemy_sign),
-            },
-            ProjectileShot {
-                kind: ProjectileKind::HomingMissile,
-                damage: power + 7,
-                velocity: Vec2::new(0.0, 360.0 * enemy_sign),
-            },
-        ],
-        "burst" => vec![
-            ProjectileShot {
-                kind: ProjectileKind::Spread,
-                damage: power,
-                velocity: Vec2::new(-80.0, 260.0 * enemy_sign),
-            },
-            ProjectileShot {
-                kind: ProjectileKind::Spread,
-                damage: power,
-                velocity: Vec2::new(80.0, 260.0 * enemy_sign),
-            },
-            ProjectileShot {
-                kind: ProjectileKind::HomingMissile,
-                damage: power + 4,
-                velocity: Vec2::new(0.0, 300.0 * enemy_sign),
-            },
-        ],
-        "wave" => vec![
-            ProjectileShot {
-                kind: ProjectileKind::Bolt,
-                damage: power + 2,
-                velocity: Vec2::new(120.0, 240.0 * enemy_sign),
-            },
-            ProjectileShot {
-                kind: ProjectileKind::Shockwave,
-                damage: power,
-                velocity: Vec2::ZERO,
-            },
-        ],
-        "missile" | "homing" => vec![ProjectileShot {
-            kind: ProjectileKind::HomingMissile,
-            damage: power + 8,
-            velocity: Vec2::new(0.0, 360.0 * enemy_sign),
-        }],
-        "shockwave" => vec![ProjectileShot {
-            kind: ProjectileKind::Shockwave,
-            damage: power,
-            velocity: Vec2::ZERO,
-        }],
-        "plasma" => vec![ProjectileShot {
-            kind: ProjectileKind::Plasma,
-            damage: power + 6,
-            velocity: Vec2::new(0.0, 430.0 * enemy_sign),
-        }],
-        "flak" => vec![ProjectileShot {
-            kind: ProjectileKind::Flak,
-            damage: power,
-            velocity: Vec2::new(0.0, 520.0 * enemy_sign),
-        }],
-        "rail" => vec![ProjectileShot {
-            kind: ProjectileKind::Rail,
-            damage: power + 10,
-            velocity: Vec2::new(0.0, 880.0 * enemy_sign),
-        }],
-        _ => vec![ProjectileShot {
-            kind: ProjectileKind::Bolt,
-            damage: power,
-            velocity: Vec2::new(0.0, 520.0 * enemy_sign),
-        }],
-    }
-}
-
-fn player_projectile_plan(kind: &str, count: i64, power: i64) -> Vec<ProjectileShot> {
-    let count = count.clamp(1, 5) as usize;
-    let offsets = lateral_speeds(count);
-    let shot_kind = match kind {
-        "spread" => ProjectileKind::Spread,
-        "laser" => ProjectileKind::Laser,
-        "missile" | "homing" => ProjectileKind::HomingMissile,
-        "shockwave" => ProjectileKind::Shockwave,
-        "plasma" => ProjectileKind::Plasma,
-        "flak" => ProjectileKind::Flak,
-        "rail" => ProjectileKind::Rail,
-        _ => ProjectileKind::Bolt,
-    };
-
-    offsets
-        .into_iter()
-        .map(|lateral| {
-            let (damage, speed_y) = match shot_kind {
-                ProjectileKind::Bolt => (power, 560.0),
-                ProjectileKind::Spread => (power, 520.0),
-                ProjectileKind::Laser => (power + 4, 760.0),
-                ProjectileKind::HomingMissile => (power + 6, 360.0),
-                ProjectileKind::Shockwave => ((power / 2).max(4), 0.0),
-                ProjectileKind::Plasma => (power + 5, 470.0),
-                ProjectileKind::Flak => (power + 1, 610.0),
-                ProjectileKind::Rail => (power + 10, 920.0),
-            };
-            ProjectileShot {
-                kind: shot_kind,
-                damage,
-                velocity: Vec2::new(lateral, speed_y),
-            }
-        })
-        .collect()
-}
-
-fn lateral_speeds(count: usize) -> Vec<f32> {
-    match count {
-        1 => vec![0.0],
-        2 => vec![-55.0, 55.0],
-        3 => vec![-95.0, 0.0, 95.0],
-        4 => vec![-120.0, -40.0, 40.0, 120.0],
-        _ => vec![-135.0, -70.0, 0.0, 70.0, 135.0],
-    }
-}
-
-fn spawn_projectile(
-    commands: &mut Commands,
-    assets: &ShooterAssets,
-    owner: ProjectileOwner,
-    origin: Position,
-    shot: ProjectileShot,
-) {
-    let spec = projectile_spec(shot.kind);
-    let spawn_position = Position {
-        x: origin.x,
-        y: origin.y + owner.forward_sign() * spec.spawn_offset,
-    };
-    let frames = projectile_frames(assets, owner, shot.kind);
-    let mut sprite = Sprite::from_image(frames[0].clone());
-    sprite.color = projectile_color(owner, shot.kind);
-    let mut entity = commands.spawn((
-        sprite,
-        Transform {
-            translation: Vec3::new(spawn_position.x, spawn_position.y, 3.0),
-            scale: Vec3::splat(spec.scale),
-            rotation: projectile_rotation(shot.velocity, owner),
-        },
-        spawn_position,
-        Velocity {
-            x: shot.velocity.x,
-            y: shot.velocity.y,
-        },
-        Projectile {
-            owner,
-            damage: shot.damage,
-            radius: spec.radius,
-            pierces: spec.pierces,
-        },
-        SpriteFrames::new(frames, spec.frame_ms),
-        VisualMotion {
-            base_scale: Vec3::splat(spec.scale),
-            pulse: spec.pulse,
-            spin: spec.spin * owner.forward_sign(),
-            phase: 0.0,
-        },
-    ));
-
-    match owner {
-        ProjectileOwner::Player => {
-            entity.insert(PlayerBullet);
-        }
-        ProjectileOwner::Enemy => {
-            entity.insert(EnemyBullet);
-        }
-    }
-
-    if spec.pierces {
-        entity.insert(HitTargets::default());
-    }
-    if let Some(duration_ms) = spec.lifetime_ms {
-        entity.insert(Lifetime {
-            elapsed_ms: 0.0,
-            duration_ms,
-        });
-    }
-    if shot.kind == ProjectileKind::HomingMissile {
-        entity.insert(Homing {
-            speed: spec.speed,
-            turn_rate: 3.2,
-        });
-    }
-    if shot.kind == ProjectileKind::Shockwave {
-        entity.insert(Shockwave {
-            start_radius: 18.0,
-            end_radius: 96.0,
-            start_scale: 0.36,
-            end_scale: 2.0,
-        });
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ProjectileSpec {
-    radius: f32,
-    scale: f32,
-    speed: f32,
-    spawn_offset: f32,
-    frame_ms: f32,
-    pulse: f32,
-    spin: f32,
-    pierces: bool,
-    lifetime_ms: Option<f32>,
-}
-
-fn projectile_spec(kind: ProjectileKind) -> ProjectileSpec {
-    match kind {
-        ProjectileKind::Bolt => ProjectileSpec {
-            radius: 16.0,
-            scale: 1.25,
-            speed: 520.0,
-            spawn_offset: 34.0,
-            frame_ms: 90.0,
-            pulse: 0.08,
-            spin: 0.0,
-            pierces: false,
-            lifetime_ms: None,
-        },
-        ProjectileKind::Spread => ProjectileSpec {
-            radius: 14.0,
-            scale: 1.05,
-            speed: 500.0,
-            spawn_offset: 34.0,
-            frame_ms: 80.0,
-            pulse: 0.1,
-            spin: 0.0,
-            pierces: false,
-            lifetime_ms: None,
-        },
-        ProjectileKind::Laser => ProjectileSpec {
-            radius: 18.0,
-            scale: 1.55,
-            speed: 760.0,
-            spawn_offset: 38.0,
-            frame_ms: 55.0,
-            pulse: 0.12,
-            spin: 0.0,
-            pierces: true,
-            lifetime_ms: None,
-        },
-        ProjectileKind::HomingMissile => ProjectileSpec {
-            radius: 20.0,
-            scale: 0.58,
-            speed: 360.0,
-            spawn_offset: 42.0,
-            frame_ms: 110.0,
-            pulse: 0.04,
-            spin: 0.0,
-            pierces: false,
-            lifetime_ms: None,
-        },
-        ProjectileKind::Shockwave => ProjectileSpec {
-            radius: 18.0,
-            scale: 0.36,
-            speed: 0.0,
-            spawn_offset: 22.0,
-            frame_ms: 70.0,
-            pulse: 0.0,
-            spin: 0.35,
-            pierces: true,
-            lifetime_ms: Some(620.0),
-        },
-        ProjectileKind::Plasma => ProjectileSpec {
-            radius: 22.0,
-            scale: 1.45,
-            speed: 470.0,
-            spawn_offset: 38.0,
-            frame_ms: 70.0,
-            pulse: 0.14,
-            spin: 0.08,
-            pierces: false,
-            lifetime_ms: None,
-        },
-        ProjectileKind::Flak => ProjectileSpec {
-            radius: 13.0,
-            scale: 0.95,
-            speed: 610.0,
-            spawn_offset: 32.0,
-            frame_ms: 65.0,
-            pulse: 0.08,
-            spin: 0.18,
-            pierces: false,
-            lifetime_ms: None,
-        },
-        ProjectileKind::Rail => ProjectileSpec {
-            radius: 15.0,
-            scale: 1.75,
-            speed: 920.0,
-            spawn_offset: 42.0,
-            frame_ms: 45.0,
-            pulse: 0.06,
-            spin: 0.0,
-            pierces: true,
-            lifetime_ms: None,
-        },
     }
 }
 
@@ -2099,158 +867,6 @@ fn projectile_rotation(velocity: Vec2, owner: ProjectileOwner) -> Quat {
     Quat::from_rotation_z(velocity.y.atan2(velocity.x) - FRAC_PI_2)
 }
 
-fn guide_homing_projectiles(
-    time: Res<Time>,
-    flow: Res<GameFlow>,
-    mut projectiles: Query<(&Position, &mut Velocity, &Projectile, &Homing)>,
-    enemies: Query<&Position, With<Enemy>>,
-    players: Query<&Position, (With<Player>, Without<Enemy>)>,
-) {
-    if !flow.is_running() {
-        return;
-    }
-
-    for (position, mut velocity, projectile, homing) in &mut projectiles {
-        let target = match projectile.owner {
-            ProjectileOwner::Player => nearest_target(*position, enemies.iter()),
-            ProjectileOwner::Enemy => nearest_target(*position, players.iter()),
-        };
-        let Some(target) = target else {
-            continue;
-        };
-        let updated = homing_velocity_step(
-            Velocity {
-                x: velocity.x,
-                y: velocity.y,
-            },
-            *position,
-            target,
-            homing.speed,
-            homing.turn_rate * time.delta_secs(),
-        );
-        velocity.x = updated.x;
-        velocity.y = updated.y;
-    }
-}
-
-fn nearest_target<'a>(
-    origin: Position,
-    positions: impl Iterator<Item = &'a Position>,
-) -> Option<Position> {
-    positions.copied().min_by(|a, b| {
-        distance_squared(origin, *a)
-            .partial_cmp(&distance_squared(origin, *b))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    })
-}
-
-fn homing_velocity_step(
-    current: Velocity,
-    origin: Position,
-    target: Position,
-    speed: f32,
-    turn_amount: f32,
-) -> Velocity {
-    let to_target = Vec2::new(target.x - origin.x, target.y - origin.y);
-    if to_target.length_squared() == 0.0 {
-        return current;
-    }
-
-    let current = Vec2::new(current.x, current.y);
-    let forward_sign = current.y.signum();
-    let desired = forward_homing_direction(to_target, forward_sign) * speed;
-    let next = if current.length_squared() == 0.0 {
-        desired
-    } else {
-        current.lerp(desired, turn_amount.clamp(0.0, 1.0))
-    };
-    Velocity {
-        x: next.x,
-        y: next.y,
-    }
-}
-
-fn forward_homing_direction(to_target: Vec2, forward_sign: f32) -> Vec2 {
-    let target_direction = to_target.normalize();
-    if forward_sign == 0.0 || target_direction.y.signum() == forward_sign {
-        return target_direction;
-    }
-
-    let side = target_direction.x;
-    let forward = forward_sign * (1.0 - side.abs()).max(0.08);
-    Vec2::new(side, forward).normalize()
-}
-
-fn apply_velocity(time: Res<Time>, flow: Res<GameFlow>, mut query: MovingProjectileQuery) {
-    if !flow.is_running() {
-        return;
-    }
-
-    for (velocity, mut position) in &mut query {
-        position.x += velocity.x * time.delta_secs();
-        position.y += velocity.y * time.delta_secs();
-    }
-}
-
-fn tick_lifetimes(
-    mut commands: Commands,
-    time: Res<Time>,
-    flow: Res<GameFlow>,
-    mut query: Query<(Entity, &mut Lifetime)>,
-) {
-    if !flow.is_running() {
-        return;
-    }
-
-    for (entity, mut lifetime) in &mut query {
-        lifetime.elapsed_ms += time.delta_secs() * 1000.0;
-        if lifetime.elapsed_ms >= lifetime.duration_ms {
-            commands.entity(entity).despawn();
-        }
-    }
-}
-
-fn update_shockwaves(
-    flow: Res<GameFlow>,
-    mut query: Query<(
-        &mut Projectile,
-        &Shockwave,
-        &Lifetime,
-        &mut Transform,
-        Option<&mut VisualMotion>,
-    )>,
-) {
-    if !flow.is_running() {
-        return;
-    }
-
-    for (mut projectile, shockwave, lifetime, mut transform, motion) in &mut query {
-        let radius = shockwave_radius_at(
-            lifetime.elapsed_ms,
-            lifetime.duration_ms,
-            shockwave.start_radius,
-            shockwave.end_radius,
-        );
-        projectile.radius = radius;
-        let t = (lifetime.elapsed_ms / lifetime.duration_ms).clamp(0.0, 1.0);
-        let scale = shockwave.start_scale.lerp(shockwave.end_scale, t);
-        let scale = Vec3::splat(scale);
-        transform.scale = scale;
-        if let Some(mut motion) = motion {
-            motion.base_scale = scale;
-        }
-    }
-}
-
-fn shockwave_radius_at(age_ms: f32, duration_ms: f32, start_radius: f32, end_radius: f32) -> f32 {
-    let t = if duration_ms <= 0.0 {
-        1.0
-    } else {
-        (age_ms / duration_ms).clamp(0.0, 1.0)
-    };
-    start_radius.lerp(end_radius, t)
-}
-
 fn sync_positions(mut query: Query<(&Position, &mut Transform)>) {
     for (position, mut transform) in &mut query {
         transform.translation.x = position.x;
@@ -2279,67 +895,6 @@ fn animate_visual_motion(time: Res<Time>, mut query: Query<(&mut Transform, &mut
         transform.scale = motion.base_scale * pulse;
         if motion.spin != 0.0 {
             transform.rotate_z(motion.spin * time.delta_secs());
-        }
-    }
-}
-
-fn collisions(
-    mut commands: Commands,
-    assets: Res<ShooterAssets>,
-    mut score: ResMut<Score>,
-    flow: Res<GameFlow>,
-    mut projectiles: Query<(Entity, &Position, &Projectile, Option<&mut HitTargets>)>,
-    mut enemies: Query<(Entity, &Enemy, &Position, &mut Health), Without<Player>>,
-    mut players: Query<(&Position, &mut Health), (With<Player>, Without<Enemy>)>,
-) {
-    if !flow.is_running() {
-        return;
-    }
-
-    for (projectile_entity, projectile_pos, projectile, mut hit_targets) in &mut projectiles {
-        match projectile.owner {
-            ProjectileOwner::Player => {
-                for (enemy_entity, enemy, enemy_pos, mut health) in &mut enemies {
-                    if !overlaps(*projectile_pos, *enemy_pos, projectile.radius) {
-                        continue;
-                    }
-                    if already_hit(&mut hit_targets, enemy_entity) {
-                        continue;
-                    }
-
-                    health.0 -= projectile.damage;
-                    spawn_hit_effect(&mut commands, &assets, *enemy_pos, ProjectileOwner::Player);
-                    if !projectile.pierces {
-                        commands.entity(projectile_entity).despawn();
-                    }
-                    if health.0 <= 0 {
-                        commands.spawn((reward_drop_for_enemy(enemy.kind.as_str()), *enemy_pos));
-                        spawn_explosion(&mut commands, &assets, *enemy_pos, enemy.kind.as_str());
-                        commands.entity(enemy_entity).despawn();
-                        **score += 1;
-                    }
-                    if !projectile.pierces {
-                        break;
-                    }
-                }
-            }
-            ProjectileOwner::Enemy => {
-                let Some((player_pos, mut player_health)) = players.iter_mut().next() else {
-                    continue;
-                };
-                if !overlaps(*projectile_pos, *player_pos, projectile.radius) {
-                    continue;
-                }
-                if already_hit(&mut hit_targets, Entity::PLACEHOLDER) {
-                    continue;
-                }
-
-                player_health.0 = (player_health.0 - projectile.damage).max(0);
-                spawn_hit_effect(&mut commands, &assets, *player_pos, ProjectileOwner::Enemy);
-                if !projectile.pierces {
-                    commands.entity(projectile_entity).despawn();
-                }
-            }
         }
     }
 }
@@ -2413,172 +968,322 @@ fn spawn_explosion(
     ));
 }
 
-fn reward_drop_for_enemy(kind: &str) -> RewardItem {
-    match kind {
-        "tank" => RewardItem {
-            kind: "health".to_string(),
-            amount: 20,
-        },
-        "boss" => RewardItem {
-            kind: "health".to_string(),
-            amount: 35,
-        },
-        "bomber" | "carrier" => RewardItem {
-            kind: "bullets".to_string(),
-            amount: 2,
-        },
-        _ => RewardItem {
-            kind: "bullets".to_string(),
-            amount: 1,
-        },
-    }
-}
-
-fn run_scripted_spawn_rules(world: &mut World) {
-    let is_running = world
-        .get_resource::<GameFlow>()
-        .map(|flow| flow.is_running())
-        .unwrap_or(true);
-    if !is_running {
-        return;
-    }
-
-    let delta_ms = world
-        .get_resource::<Time>()
-        .map(|time| (time.delta_secs() * 1000.0).round() as i64)
-        .unwrap_or(0);
-    let score = world
-        .get_resource::<Score>()
-        .map(|score| score.0)
-        .unwrap_or(0);
-    let kills_delta = {
-        let mut progress = world.resource_mut::<SpawnRuleProgress>();
-        let kills_delta = score.saturating_sub(progress.last_score);
-        progress.last_score = score;
-        kills_delta
-    };
-
-    tick_shooter_spawn_rules(world, delta_ms, kills_delta as i64);
-}
-
-fn update_game_flow_after_health(
-    mut flow: ResMut<GameFlow>,
-    players: Query<&Health, With<Player>>,
-) {
-    if *flow == GameFlow::GameOver {
-        return;
-    }
-    if players.iter().any(|health| health.0 <= 0) {
-        *flow = GameFlow::GameOver;
-    }
-}
-
-fn collect_rewards(
-    mut commands: Commands,
-    flow: Res<GameFlow>,
-    mut players: Query<(&Position, &mut Health, &mut PlayerProjectileLoadout), With<Player>>,
-    rewards: Query<(Entity, &Position, &RewardItem), Without<Player>>,
-) {
-    if !flow.is_running() {
-        return;
-    }
-
-    let Some((player_position, mut health, mut loadout)) = players.iter_mut().next() else {
-        return;
-    };
-
-    for (entity, reward_position, reward) in &rewards {
-        if !overlaps(*player_position, *reward_position, 42.0) {
-            continue;
-        }
-
-        match reward.kind.as_str() {
-            "health" | "hp" => {
-                health.0 = (health.0 + reward.amount).clamp(0, PLAYER_MAX_HEALTH);
-            }
-            "bullets" | "bullet" | "ammo" => {
-                loadout.count = (loadout.count + reward.amount).clamp(1, 5);
-            }
-            _ => {}
-        }
-
-        commands.entity(entity).despawn();
-    }
-}
-
-fn already_hit(hit_targets: &mut Option<Mut<HitTargets>>, target: Entity) -> bool {
-    let Some(hit_targets) = hit_targets.as_mut() else {
-        return false;
-    };
-    if hit_targets.0.contains(&target) {
-        return true;
-    }
-    hit_targets.0.push(target);
-    false
-}
-
-fn overlaps(a: Position, b: Position, radius: f32) -> bool {
-    let dx = a.x - b.x;
-    let dy = a.y - b.y;
-    dx * dx + dy * dy <= radius * radius
-}
-
-fn distance_squared(a: Position, b: Position) -> f32 {
-    let dx = a.x - b.x;
-    let dy = a.y - b.y;
-    dx * dx + dy * dy
-}
-
-fn despawn_out_of_bounds(
-    mut commands: Commands,
-    flow: Res<GameFlow>,
-    bullets: BulletPositionQuery,
-    enemies: ScriptManagedEnemyPositionQuery,
-) {
-    if !flow.is_running() {
-        return;
-    }
-
-    for (entity, position) in &bullets {
-        if position.x < LEFT - 140.0
-            || position.x > RIGHT + 140.0
-            || position.y < BOTTOM - 160.0
-            || position.y > TOP + 160.0
-        {
-            commands.entity(entity).despawn();
-        }
-    }
-    for (entity, position) in &enemies {
-        if position.y < BOTTOM - 120.0 {
-            commands.entity(entity).despawn();
-        }
-    }
-}
-
 fn jit_status_label(enabled: bool, trace_count: usize) -> String {
     let state = if enabled { "on" } else { "off" };
     format!("JIT: {state}   traces: {trace_count}")
 }
 
-fn script_panel(
-    mut contexts: EguiContexts,
-    mut editor: ResMut<ScriptEditor>,
-    mut flow: ResMut<GameFlow>,
-    score: Res<Score>,
-    player: Query<
+fn tick_script_gameplay(world: &mut World) {
+    if !world.resource::<GameFlow>().is_running() {
+        return;
+    }
+    let delta_ms = world.resource::<Time>().delta_secs_f64() * 1000.0;
+    let input = world.resource::<ButtonInput<KeyCode>>();
+    let dx = i32::from(input.pressed(KeyCode::ArrowRight) || input.pressed(KeyCode::KeyD))
+        - i32::from(input.pressed(KeyCode::ArrowLeft) || input.pressed(KeyCode::KeyA));
+    let dy = i32::from(input.pressed(KeyCode::ArrowUp) || input.pressed(KeyCode::KeyW))
+        - i32::from(input.pressed(KeyCode::ArrowDown) || input.pressed(KeyCode::KeyS));
+    let mut frame = world.get_resource_or_insert_with(ShooterFrame::default);
+    frame.0.insert("delta_ms".into(), delta_ms);
+    frame.0.insert("input_x".into(), dx as f64);
+    frame.0.insert("input_y".into(), dy as f64);
+    frame.0.insert("kills_delta".into(), 0.0);
+    let sources = world
+        .resource::<ScriptEditor>()
+        .editor
+        .tabs
+        .iter()
+        .skip(1)
+        .map(|tab| tab.active_source.clone())
+        .collect::<Vec<_>>();
+    let mut traces = 0;
+    for (index, source) in sources.iter().enumerate() {
+        match run_shooter_frame_script(world, source) {
+            Ok(jit) => traces += jit.trace_count,
+            Err(error) => {
+                world.insert_resource(GameFlow::Paused);
+                let mut scripts = world.resource_mut::<ScriptEditor>();
+                scripts.editor.tabs[index + 1].status = format!("Runtime error: {error}");
+                scripts.status = error;
+                return;
+            }
+        }
+    }
+    world.resource_mut::<ScriptEditor>().jit_trace_count = traces;
+    let frame = world.resource::<ShooterFrame>();
+    let score = frame.0.get("score").copied().unwrap_or(0.0) as u32;
+    let game_over = frame.0.get("game_over").copied().unwrap_or(0.0) != 0.0;
+    world.resource_mut::<Score>().0 = score;
+    if game_over {
+        world.insert_resource(GameFlow::GameOver);
+    }
+}
+
+fn visual_kind(kind: &str) -> ProjectileKind {
+    match kind {
+        "spread" => ProjectileKind::Spread,
+        "laser" => ProjectileKind::Laser,
+        "missile" | "homing" => ProjectileKind::HomingMissile,
+        "shockwave" => ProjectileKind::Shockwave,
+        "plasma" => ProjectileKind::Plasma,
+        "flak" => ProjectileKind::Flak,
+        "rail" => ProjectileKind::Rail,
+        _ => ProjectileKind::Bolt,
+    }
+}
+
+fn visual_owner(owner: &str) -> ProjectileOwner {
+    if owner == "player" {
+        ProjectileOwner::Player
+    } else {
+        ProjectileOwner::Enemy
+    }
+}
+
+fn attach_projectile_visuals(
+    mut commands: Commands,
+    assets: Res<ShooterAssets>,
+    query: Query<
         (
+            Entity,
+            &Position,
+            &Velocity,
+            &ShooterProjectile,
+            &ShooterData,
+        ),
+        Added<ShooterProjectile>,
+    >,
+) {
+    for (entity, position, velocity, projectile, data) in &query {
+        let owner = visual_owner(&projectile.owner);
+        let kind = visual_kind(&projectile.kind);
+        let frames = projectile_frames(&assets, owner, kind);
+        let mut sprite = Sprite::from_image(frames[0].clone());
+        sprite.color = projectile_color(owner, kind);
+        let get = |key: &str| data.0.get(key).copied().unwrap_or(0.0) as f32;
+        let scale = Vec3::splat(get("scale"));
+        commands.entity(entity).insert((
+            sprite,
+            Transform {
+                translation: Vec3::new(position.x, position.y, 3.0),
+                scale,
+                rotation: projectile_rotation(Vec2::new(velocity.x, velocity.y), owner),
+            },
+            SpriteFrames::new(frames, get("frame_ms")),
+            VisualMotion {
+                base_scale: scale,
+                pulse: get("pulse"),
+                spin: get("spin"),
+                phase: 0.0,
+            },
+        ));
+    }
+}
+
+fn sync_projectile_visuals(
+    mut query: Query<(
+        &ShooterProjectile,
+        &ShooterData,
+        &Velocity,
+        &mut Transform,
+        &mut VisualMotion,
+    )>,
+) {
+    for (projectile, data, velocity, mut transform, mut motion) in &mut query {
+        motion.base_scale = Vec3::splat(data.0.get("scale").copied().unwrap_or(1.0) as f32);
+        transform.rotation = projectile_rotation(
+            Vec2::new(velocity.x, velocity.y),
+            visual_owner(&projectile.owner),
+        );
+    }
+}
+
+fn play_script_effects(
+    mut commands: Commands,
+    assets: Res<ShooterAssets>,
+    mut effects: Option<ResMut<ShooterEffects>>,
+) {
+    let Some(effects) = effects.as_mut() else {
+        return;
+    };
+    for (kind, position) in effects.0.drain(..) {
+        match kind.strip_prefix("explosion_") {
+            Some(enemy_kind) => spawn_explosion(&mut commands, &assets, position, enemy_kind),
+            None => spawn_hit_effect(
+                &mut commands,
+                &assets,
+                position,
+                if kind == "hit_enemy" {
+                    ProjectileOwner::Enemy
+                } else {
+                    ProjectileOwner::Player
+                },
+            ),
+        }
+    }
+}
+
+fn tick_visual_lifetimes(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut query: Query<(Entity, &mut Lifetime)>,
+) {
+    for (entity, mut lifetime) in &mut query {
+        lifetime.elapsed_ms += time.delta_secs() * 1000.0;
+        if lifetime.elapsed_ms >= lifetime.duration_ms {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+fn handle_editor_actions(
+    world: &mut World,
+    scripts: &mut ScriptEditor,
+    actions: Vec<EditorAction>,
+) {
+    for action in actions {
+        match action {
+            EditorAction::StartDebug(tab) => start_shooter_debug(world, scripts, tab),
+            EditorAction::StopDebug => {
+                scripts.debug_session = None;
+                scripts.editor.clear_debug_state();
+                if let Some(previous) = scripts.debug_previous_flow.take() {
+                    world.insert_resource(previous);
+                }
+            }
+            EditorAction::StepDebug
+            | EditorAction::NextDebug
+            | EditorAction::ContinueDebug
+            | EditorAction::RefreshLocals => {
+                let command = match action {
+                    EditorAction::StepDebug => "step",
+                    EditorAction::NextDebug => "next",
+                    EditorAction::ContinueDebug => "continue",
+                    _ => "locals",
+                };
+                if let Some(session) = scripts.debug_session.as_ref() {
+                    session.command(&mut scripts.editor, command);
+                }
+            }
+            EditorAction::RunDebugCommand(command) => {
+                if let Some(session) = scripts.debug_session.as_ref() {
+                    session.console_command(&mut scripts.editor, &command);
+                }
+            }
+            EditorAction::EvaluateHover { tab, name } => {
+                if let Some(session) = scripts.debug_session.as_ref() {
+                    session.evaluate_hover(&mut scripts.editor, tab, &name);
+                }
+            }
+            EditorAction::ToggleBreakpoint { tab, line, enabled } => {
+                if scripts.editor.debug_tab == Some(tab)
+                    && let Some(session) = scripts.debug_session.as_ref()
+                {
+                    session.set_breakpoint(&mut scripts.editor, line, enabled);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn start_shooter_debug(world: &mut World, scripts: &mut ScriptEditor, tab: usize) {
+    use std::{sync::mpsc, thread};
+    scripts.debug_session = None;
+    let source = scripts.editor.active_source(tab).to_owned();
+    let mut debug_world = snapshot_shooter_world(world);
+    let bridge = DebugCommandBridge::new();
+    let thread_bridge = bridge.clone();
+    let (sender, receiver) = mpsc::channel::<String>();
+    thread::spawn(move || {
+        let mut debugger = Debugger::with_command_bridge(thread_bridge);
+        debugger.stop_on_entry();
+        let result = debug_shooter_script(&mut debug_world, &source, &mut debugger);
+        let _ = sender.send(
+            result
+                .map(|_| "shooter debug complete".to_owned())
+                .unwrap_or_else(|error| format!("debug error: {error}")),
+        );
+    });
+    if scripts.debug_previous_flow.is_none() {
+        scripts.debug_previous_flow = Some(*world.resource::<GameFlow>());
+    }
+    world.insert_resource(GameFlow::Paused);
+    scripts.editor.begin_debug_session(tab);
+    scripts.debug_session = Some(DebugSession::new(
+        bridge,
+        receiver,
+        tab,
+        scripts.editor.source_line_offset(tab),
+        scripts.editor.user_breakpoints(tab),
+    ));
+}
+
+#[cfg(target_arch = "wasm32")]
+fn start_shooter_debug(world: &mut World, scripts: &mut ScriptEditor, tab: usize) {
+    scripts.debug_session = None;
+    let source = scripts.editor.active_source(tab).to_owned();
+    let snapshot = snapshot_shooter_world(world);
+    match CooperativeDebugger::from_shooter_snapshot(snapshot, &source) {
+        Ok(debugger) => {
+            if scripts.debug_previous_flow.is_none() {
+                scripts.debug_previous_flow = Some(*world.resource::<GameFlow>());
+            }
+            world.insert_resource(GameFlow::Paused);
+            scripts.editor.begin_debug_session(tab);
+            scripts.debug_session = Some(DebugSession::new_web(
+                debugger,
+                tab,
+                scripts.editor.source_line_offset(tab),
+                scripts.editor.user_breakpoints(tab),
+                |_| {},
+            ));
+        }
+        Err(error) => {
+            scripts.editor.clear_debug_state();
+            scripts.editor.debug_output = format!("debug error: {error}");
+            if let Some(previous) = scripts.debug_previous_flow.take() {
+                world.insert_resource(previous);
+            }
+        }
+    }
+}
+
+fn script_panel(world: &mut World) {
+    let mut editor = world.remove_resource::<ScriptEditor>().unwrap_or_default();
+    editor.editor.update_auto_apply(Instant::now());
+    if editor.editor.active_source(0) != editor.last_initial_source {
+        editor.pending_save = true;
+    }
+    if let Some(session) = editor.debug_session.as_mut() {
+        session.poll(&mut editor.editor);
+    }
+    if !editor.editor.debug_attached && !editor.editor.debug_starting {
+        if let Some(previous) = editor.debug_previous_flow.take() {
+            world.insert_resource(previous);
+        }
+    }
+    let mut flow = *world.resource::<GameFlow>();
+    let score = world.resource::<Score>().0;
+    let player = world
+        .query_filtered::<(
             &Health,
             &AttackStyle,
             &AttackPower,
             &PlayerProjectileLoadout,
-        ),
-        With<Player>,
-    >,
-    enemies: Query<&Enemy>,
-    #[cfg(target_arch = "wasm32")] mut debug: ResMut<ShooterDebug>,
-) -> bevy::prelude::Result {
-    let ctx = contexts.ctx_mut()?;
-    if *flow == GameFlow::GameOver {
+        ), With<Player>>()
+        .iter(world)
+        .next()
+        .map(|(hp, style, power, loadout)| (*hp, style.clone(), *power, loadout.clone()));
+    let enemy_count = world.query::<&Enemy>().iter(world).count();
+    let mut actions = Vec::new();
+    let mut system_state = bevy::ecs::system::SystemState::<EguiContexts>::new(world);
+    let mut contexts = system_state.get_mut(world);
+    let Ok(ctx) = contexts.ctx_mut() else {
+        world.insert_resource(editor);
+        return;
+    };
+    if flow == GameFlow::GameOver {
         egui::Area::new(egui::Id::new("game_over_overlay"))
             .anchor(
                 egui::Align2::CENTER_CENTER,
@@ -2600,7 +1305,7 @@ fn script_panel(
             });
     }
 
-    if let Some((health, _, _, loadout)) = player.iter().next() {
+    if let Some((health, _, _, loadout)) = player.as_ref() {
         let ratio = (health.0.max(0) as f32 / PLAYER_MAX_HEALTH as f32).clamp(0.0, 1.0);
         egui::Area::new(egui::Id::new("shooter_hud"))
             .anchor(egui::Align2::LEFT_TOP, egui::vec2(16.0, 16.0))
@@ -2630,23 +1335,26 @@ fn script_panel(
         .resizable(true)
         .default_width(SCRIPT_PANEL_WIDTH)
         .show(ctx, |ui| {
-            ui.heading("Live RustScript");
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("Restart").clicked() {
                     editor.pending_restart = true;
+                    actions.push(EditorAction::StopDebug);
                 }
 
-                let pause_label = if *flow == GameFlow::Paused {
+                let pause_label = if flow == GameFlow::Paused {
                     "Resume"
                 } else {
                     "Pause"
                 };
                 if ui
-                    .add_enabled(*flow != GameFlow::GameOver, egui::Button::new(pause_label))
+                    .add_enabled(
+                        flow != GameFlow::GameOver && editor.debug_previous_flow.is_none(),
+                        egui::Button::new(pause_label),
+                    )
                     .clicked()
                 {
-                    *flow = if *flow == GameFlow::Paused {
+                    flow = if flow == GameFlow::Paused {
                         GameFlow::Running
                     } else {
                         GameFlow::Paused
@@ -2655,7 +1363,7 @@ fn script_panel(
             });
             ui.label(format!("State: {}", flow.label()));
             ui.separator();
-            if let Some((health, style, power, loadout)) = player.iter().next() {
+            if let Some((health, style, power, loadout)) = player.as_ref() {
                 ui.label(format!(
                     "Player: hp {} / attack {} / power {} / {} x{}",
                     health.0.max(0),
@@ -2665,121 +1373,142 @@ fn script_panel(
                     loadout.count
                 ));
             }
-            ui.label(format!(
-                "Enemies: {}   Score: {}",
-                enemies.iter().count(),
-                **score
-            ));
+            ui.label(format!("Enemies: {}   Score: {}", enemy_count, score));
             ui.label(jit_status_label(editor.jit_enabled, editor.jit_trace_count));
             ui.label(&editor.status);
-            #[cfg(target_arch = "wasm32")]
-            {
-                ui.small("Debugger evaluates an isolated sandbox; live ships keep running.");
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(debug.session.is_none(), egui::Button::new("Debug"))
-                        .clicked()
-                    {
-                        debug.source = Some(editor.buffer.clone());
-                    }
-                    let paused = debug.session.is_some() && !debug.running && !debug.finished;
-                    for (label, command) in [
-                        ("Step", "step"),
-                        ("Next", "next"),
-                        ("Out", "out"),
-                        ("Continue", "continue"),
-                        ("Locals", "locals"),
-                    ] {
-                        if ui.add_enabled(paused, egui::Button::new(label)).clicked() {
-                            debug.commands.push(command.to_string());
-                        }
-                    }
-                    if ui
-                        .add_enabled(debug.running, egui::Button::new("Pause"))
-                        .clicked()
-                    {
-                        debug.commands.push("pause".to_string());
-                    }
-                    if ui
-                        .add_enabled(debug.session.is_some(), egui::Button::new("Stop"))
-                        .clicked()
-                    {
-                        debug.stop = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Break line");
-                    ui.add(egui::DragValue::new(&mut debug.breakpoint).range(1..=100_000));
-                    for (label, verb) in [("Set", "break"), ("Clear", "clear")] {
-                        if ui
-                            .add_enabled(debug.session.is_some(), egui::Button::new(label))
-                            .clicked()
-                        {
-                            let line = debug.breakpoint;
-                            debug.commands.push(format!("{verb} line {line}"));
-                        }
-                    }
-                    if let Some(line) = debug.line {
-                        ui.label(format!("debug line {line}"));
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut debug.console)
-                            .hint_text("print NAME / stack / where")
-                            .desired_width(220.0),
-                    );
-                    if ui
-                        .add_enabled(debug.session.is_some(), egui::Button::new("Send"))
-                        .clicked()
-                    {
-                        let command = std::mem::take(&mut debug.console);
-                        debug.commands.push(command);
-                    }
-                });
-                egui::ScrollArea::vertical()
-                    .id_salt("shooter_debug_output")
-                    .max_height(90.0)
-                    .show(ui, |ui| {
-                        ui.monospace(&debug.output);
-                    });
-            }
             ui.separator();
-            let diagnostics = editor.diagnostics.clone();
-            let mut layouter =
-                move |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
-                    let mut job = rustscript_layout_job(text.as_str(), &diagnostics);
-                    job.wrap.max_width = wrap_width;
-                    ui.fonts_mut(|fonts| fonts.layout_job(job))
-                };
-            let code_height = (ui.available_height() - 34.0).max(180.0);
-            egui::ScrollArea::vertical()
-                .id_salt("shooter_script_source")
-                .max_height(code_height)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut editor.buffer)
-                            .code_editor()
-                            .font(egui::FontId::monospace(13.0))
-                            .desired_rows(26)
-                            .desired_width(f32::INFINITY)
-                            .layouter(&mut layouter),
-                    );
-                    render_script_diagnostics(ui, &editor.diagnostics);
-                });
-            if ui.button("Save and apply now").clicked() {
-                editor.pending_save = true;
-            }
+            actions.extend(editor.editor.ui(ui));
         });
-    Ok(())
+    drop(contexts);
+    system_state.apply(world);
+    world.insert_resource(flow);
+    handle_editor_actions(world, &mut editor, actions);
+    world.insert_resource(editor);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use bevy::ecs::schedule::ScheduleLabel;
-    use rustscript_bevy_gameplay::{ShooterEnemySpawnRule, ShooterSpawnTrigger};
+
+    #[test]
+    fn every_rss_tab_can_start_step_inspect_and_finish_a_debug_session() {
+        use std::{
+            thread,
+            time::{Duration, Instant as NativeInstant},
+        };
+        let mut world = World::new();
+        apply_shooter_script(&mut world, SCRIPT).unwrap();
+        world.insert_resource(GameFlow::Running);
+        world.insert_resource(ShooterFrame(std::collections::HashMap::from([(
+            "delta_ms".into(),
+            16.0,
+        )])));
+        let mut scripts = ScriptEditor::default();
+        assert_eq!(scripts.editor.tabs.len(), 5);
+        assert!(
+            scripts
+                .editor
+                .tabs
+                .iter()
+                .all(|tab| tab.diagnostics.is_empty())
+        );
+        for tab in 0..5 {
+            start_shooter_debug(&mut world, &mut scripts, tab);
+            assert_eq!(*world.resource::<GameFlow>(), GameFlow::Paused);
+            let deadline = NativeInstant::now() + Duration::from_secs(5);
+            while !scripts.editor.debug_attached && NativeInstant::now() < deadline {
+                scripts
+                    .debug_session
+                    .as_mut()
+                    .unwrap()
+                    .poll(&mut scripts.editor);
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                scripts.editor.debug_attached,
+                "tab {tab}: {}",
+                scripts.editor.debug_output
+            );
+            assert!(scripts.editor.debug_line.is_some());
+            handle_editor_actions(&mut world, &mut scripts, vec![EditorAction::StepDebug]);
+            while !scripts.editor.debug_attached && NativeInstant::now() < deadline {
+                scripts
+                    .debug_session
+                    .as_mut()
+                    .unwrap()
+                    .poll(&mut scripts.editor);
+                thread::sleep(Duration::from_millis(5));
+            }
+            handle_editor_actions(&mut world, &mut scripts, vec![EditorAction::NextDebug]);
+            while !scripts.editor.debug_attached && NativeInstant::now() < deadline {
+                scripts
+                    .debug_session
+                    .as_mut()
+                    .unwrap()
+                    .poll(&mut scripts.editor);
+                thread::sleep(Duration::from_millis(5));
+            }
+            handle_editor_actions(&mut world, &mut scripts, vec![EditorAction::RefreshLocals]);
+            handle_editor_actions(&mut world, &mut scripts, vec![EditorAction::ContinueDebug]);
+            while !scripts
+                .editor
+                .debug_output
+                .contains("shooter debug complete")
+                && NativeInstant::now() < deadline
+            {
+                scripts
+                    .debug_session
+                    .as_mut()
+                    .unwrap()
+                    .poll(&mut scripts.editor);
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                scripts
+                    .editor
+                    .debug_output
+                    .contains("shooter debug complete"),
+                "tab {tab}: {}",
+                scripts.editor.debug_output
+            );
+            handle_editor_actions(&mut world, &mut scripts, vec![EditorAction::StopDebug]);
+            assert_eq!(*world.resource::<GameFlow>(), GameFlow::Running);
+            assert_eq!(world.query::<&Enemy>().iter(&world).count(), 7);
+            assert_eq!(world.query::<&ShooterProjectile>().iter(&world).count(), 0);
+        }
+    }
+
+    #[test]
+    fn pause_freezes_rss_and_restart_clears_runtime_entities_and_score() {
+        let mut world = World::new();
+        apply_shooter_script(&mut world, SCRIPT).unwrap();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(ButtonInput::<KeyCode>::default());
+        world.insert_resource(Score(4));
+        world.insert_resource(GameFlow::Paused);
+        world.insert_resource(ScriptEditor::default());
+        let positions = world
+            .query::<&Position>()
+            .iter(&world)
+            .copied()
+            .collect::<Vec<_>>();
+        tick_script_gameplay(&mut world);
+        assert_eq!(
+            positions,
+            world
+                .query::<&Position>()
+                .iter(&world)
+                .copied()
+                .collect::<Vec<_>>()
+        );
+        run_shooter_frame_script(&mut world, "use bevy; bevy::Shooter::projectile(\"player\", \"bolt\", 0.0, 0.0, 0.0, 0.0, 8.0); true;").unwrap();
+        restart_gameplay(&mut world, SCRIPT).unwrap();
+        assert_eq!(world.resource::<Score>().0, 0);
+        assert_eq!(*world.resource::<GameFlow>(), GameFlow::Running);
+        assert_eq!(world.query::<&Enemy>().iter(&world).count(), 7);
+        assert_eq!(world.query::<&ShooterProjectile>().iter(&world).count(), 0);
+    }
 
     fn test_shooter_assets() -> ShooterAssets {
         let image = Handle::<Image>::default();
@@ -2808,57 +1537,6 @@ mod tests {
                 image,
             ],
         }
-    }
-
-    #[test]
-    fn rustscript_highlighter_marks_keywords_host_calls_and_literals() {
-        let source = r#"let hp: bool = bevy::Shooter::set_player_health(95);"#;
-        let tokens = rustscript_highlight_tokens(source);
-
-        assert!(
-            tokens
-                .iter()
-                .any(|token| token.kind == ScriptTokenKind::Keyword && token.text(source) == "let")
-        );
-        assert!(
-            tokens
-                .iter()
-                .any(|token| token.kind == ScriptTokenKind::Type && token.text(source) == "bool")
-        );
-        assert!(
-            tokens
-                .iter()
-                .any(|token| token.kind == ScriptTokenKind::HostApi
-                    && token.text(source) == "bevy::Shooter::set_player_health")
-        );
-        assert!(
-            tokens
-                .iter()
-                .any(|token| token.kind == ScriptTokenKind::Number && token.text(source) == "95")
-        );
-    }
-
-    #[test]
-    fn script_diagnostics_include_line_span_and_source_line() {
-        let source = "use bevy;\nlet hp: bool = bevy::Shooter::set_player_health(95\ntrue;\n";
-        let diagnostics = script_compile_diagnostics(source, "fallback error");
-
-        assert_eq!(diagnostics.len(), 1);
-        let diagnostic = &diagnostics[0];
-        assert_eq!(diagnostic.line, 2);
-        assert!(diagnostic.start_col >= 1);
-        assert!(diagnostic.end_col >= diagnostic.start_col);
-        assert_eq!(
-            diagnostic.source_line,
-            "let hp: bool = bevy::Shooter::set_player_health(95"
-        );
-        assert!(diagnostic.message.contains("expected"));
-    }
-
-    #[test]
-    fn jit_status_label_shows_trace_count() {
-        assert_eq!(jit_status_label(true, 3), "JIT: on   traces: 3");
-        assert_eq!(jit_status_label(false, 0), "JIT: off   traces: 0");
     }
 
     #[test]
@@ -2958,393 +1636,6 @@ mod tests {
     }
 
     #[test]
-    fn collisions_system_accepts_disjoint_player_and_enemy_health_queries() {
-        let mut app = App::new();
-        app.insert_resource(Score(0))
-            .insert_resource(test_shooter_assets())
-            .insert_resource(GameFlow::Running)
-            .add_systems(Update, collisions);
-
-        app.world_mut()
-            .spawn((Player, Position { x: 0.0, y: 0.0 }, Health(100)));
-        app.world_mut().spawn((
-            Enemy {
-                kind: "grunt".to_string(),
-            },
-            Position { x: 50.0, y: 0.0 },
-            Health(30),
-        ));
-
-        app.update();
-    }
-
-    #[test]
-    fn defeated_enemy_drops_reward_at_enemy_position() {
-        let mut app = App::new();
-        app.insert_resource(Score(0))
-            .insert_resource(test_shooter_assets())
-            .insert_resource(GameFlow::Running)
-            .add_systems(Update, collisions);
-
-        app.world_mut()
-            .spawn((Player, Position { x: 0.0, y: -360.0 }, Health(100)));
-        app.world_mut().spawn((
-            Enemy {
-                kind: "tank".to_string(),
-            },
-            Position { x: 44.0, y: 188.0 },
-            Health(5),
-        ));
-        app.world_mut().spawn((
-            Position { x: 44.0, y: 188.0 },
-            Projectile {
-                owner: ProjectileOwner::Player,
-                damage: 8,
-                radius: 18.0,
-                pierces: false,
-            },
-        ));
-
-        app.update();
-
-        let (reward, position) = app
-            .world_mut()
-            .query::<(&RewardItem, &Position)>()
-            .single(app.world())
-            .expect("defeated enemy should drop a reward");
-        assert_eq!(reward.kind, "health");
-        assert_eq!(reward.amount, 20);
-        assert_eq!(*position, Position { x: 44.0, y: 188.0 });
-    }
-
-    #[test]
-    fn enemy_projectile_damage_clamps_player_health_to_zero() {
-        let mut app = App::new();
-        app.insert_resource(Score(0))
-            .insert_resource(test_shooter_assets())
-            .insert_resource(GameFlow::Running)
-            .add_systems(Update, collisions);
-
-        app.world_mut()
-            .spawn((Player, Position { x: 0.0, y: 0.0 }, Health(25)));
-        app.world_mut().spawn((
-            Position { x: 0.0, y: 0.0 },
-            Projectile {
-                owner: ProjectileOwner::Enemy,
-                damage: 99,
-                radius: 20.0,
-                pierces: false,
-            },
-        ));
-
-        app.update();
-
-        let (_, health) = app
-            .world_mut()
-            .query::<(&Player, &Health)>()
-            .single(app.world())
-            .expect("player should remain");
-        assert_eq!(health.0, 0);
-    }
-
-    #[test]
-    fn game_flow_changes_to_game_over_when_player_health_is_zero() {
-        let mut app = App::new();
-        app.insert_resource(GameFlow::Running)
-            .add_systems(Update, update_game_flow_after_health);
-
-        app.world_mut()
-            .spawn((Player, Position { x: 0.0, y: 0.0 }, Health(0)));
-
-        app.update();
-
-        assert_eq!(*app.world().resource::<GameFlow>(), GameFlow::GameOver);
-    }
-
-    #[test]
-    fn paused_gameplay_does_not_advance_enemy_motion() {
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .insert_resource(GameFlow::Paused)
-            .add_systems(Update, enemy_motion);
-
-        app.world_mut().spawn((
-            Enemy {
-                kind: "scout".to_string(),
-            },
-            AttackStyle("straight".to_string()),
-            Position { x: 10.0, y: 200.0 },
-            Velocity { x: 0.0, y: -50.0 },
-        ));
-
-        app.update();
-
-        let position = app
-            .world_mut()
-            .query::<&Position>()
-            .single(app.world())
-            .expect("enemy should remain");
-        assert_eq!(*position, Position { x: 10.0, y: 200.0 });
-    }
-
-    #[test]
-    fn enemy_motion_profiles_vary_by_enemy_kind() {
-        let scout = enemy_motion_profile("scout", "straight");
-        let tank = enemy_motion_profile("tank", "straight");
-        let weaver = enemy_motion_profile("weaver", "straight");
-        let striker = enemy_motion_profile("striker", "straight");
-        let sniper = enemy_motion_profile("sniper", "straight");
-
-        assert!(tank.descent_speed < scout.descent_speed);
-        assert!(striker.descent_speed > scout.descent_speed);
-        assert!(weaver.lateral_speed > scout.lateral_speed);
-        assert!(sniper.lateral_speed > tank.lateral_speed);
-        assert_ne!(weaver.phase, sniper.phase);
-    }
-
-    #[test]
-    fn enemy_motion_applies_kind_specific_trajectories() {
-        let mut app = App::new();
-        let mut time = Time::<()>::default();
-        time.advance_by(std::time::Duration::from_millis(100));
-        app.insert_resource(time)
-            .insert_resource(GameFlow::Running)
-            .add_systems(Update, enemy_motion);
-
-        for kind in ["tank", "weaver", "striker"] {
-            app.world_mut().spawn((
-                Enemy {
-                    kind: kind.to_string(),
-                },
-                AttackStyle("straight".to_string()),
-                Position { x: 0.0, y: 200.0 },
-                Velocity { x: 0.0, y: -50.0 },
-                EnemyManeuver::new(0.0),
-            ));
-        }
-
-        app.update();
-
-        let mut enemies = app
-            .world_mut()
-            .query::<(&Enemy, &Position, &Velocity)>()
-            .iter(app.world())
-            .map(|(enemy, position, velocity)| (enemy.kind.clone(), *position, *velocity))
-            .collect::<Vec<_>>();
-        enemies.sort_by(|left, right| left.0.cmp(&right.0));
-
-        let tank = enemies
-            .iter()
-            .find(|(kind, _, _)| kind == "tank")
-            .expect("tank should remain");
-        let weaver = enemies
-            .iter()
-            .find(|(kind, _, _)| kind == "weaver")
-            .expect("weaver should remain");
-        let striker = enemies
-            .iter()
-            .find(|(kind, _, _)| kind == "striker")
-            .expect("striker should remain");
-
-        assert!(tank.2.y.abs() < striker.2.y.abs());
-        assert!(weaver.2.x.abs() > tank.2.x.abs());
-        assert!(striker.1.y < tank.1.y);
-    }
-
-    #[test]
-    fn scripted_spawn_rules_use_score_delta() {
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .insert_resource(GameFlow::Running)
-            .insert_resource(Score(2))
-            .insert_resource(SpawnRuleProgress { last_score: 0 })
-            .insert_resource(ShooterSpawnRules {
-                enemies: vec![ShooterEnemySpawnRule {
-                    kind: "boss".to_string(),
-                    health: 120,
-                    attack_style: "burst".to_string(),
-                    x: 0,
-                    y: 540,
-                    trigger: ShooterSpawnTrigger::AfterKills {
-                        kill_count: 2,
-                        kills_seen: 0,
-                        fired: false,
-                    },
-                }],
-                rewards: vec![],
-            })
-            .add_systems(Update, run_scripted_spawn_rules);
-
-        app.update();
-
-        let enemies = app
-            .world_mut()
-            .query::<&Enemy>()
-            .iter(app.world())
-            .collect::<Vec<_>>();
-        assert_eq!(enemies.len(), 1);
-        assert_eq!(enemies[0].kind, "boss");
-    }
-
-    #[test]
-    fn restarting_game_resets_score_player_position_and_dynamic_entities() {
-        let mut app = App::new();
-        app.insert_resource(Score(9))
-            .insert_resource(GameFlow::GameOver);
-
-        app.world_mut().spawn((
-            Player,
-            Health(0),
-            AttackStyle("laser".to_string()),
-            AttackPower(99),
-            AttackCooldownMs(10),
-            PlayerProjectileLoadout {
-                kind: "laser".to_string(),
-                count: 5,
-            },
-            Position { x: 99.0, y: 99.0 },
-            Velocity { x: 12.0, y: 12.0 },
-            FireClock { elapsed_ms: 800.0 },
-        ));
-        app.world_mut().spawn((
-            Position { x: 0.0, y: 0.0 },
-            Projectile {
-                owner: ProjectileOwner::Player,
-                damage: 10,
-                radius: 10.0,
-                pierces: false,
-            },
-        ));
-
-        let summary = restart_gameplay(app.world_mut(), SCRIPT).expect("restart should apply");
-
-        assert_eq!(summary.player_health, 95);
-        assert_eq!(**app.world().resource::<Score>(), 0);
-        assert_eq!(*app.world().resource::<GameFlow>(), GameFlow::Running);
-
-        let (_, health, position, loadout, clock) = app
-            .world_mut()
-            .query::<(
-                &Player,
-                &Health,
-                &Position,
-                &PlayerProjectileLoadout,
-                &FireClock,
-            )>()
-            .single(app.world())
-            .expect("player should remain");
-        assert_eq!(health.0, 95);
-        assert_eq!(*position, Position { x: 0.0, y: -360.0 });
-        assert_eq!(loadout.kind, "bolt");
-        assert_eq!(loadout.count, 1);
-        assert_eq!(clock.elapsed_ms, 0.0);
-
-        let projectile_count = app
-            .world_mut()
-            .query::<&Projectile>()
-            .iter(app.world())
-            .count();
-        assert_eq!(projectile_count, 0);
-    }
-
-    #[test]
-    fn applying_script_live_keeps_existing_dynamic_entities() {
-        let live_source = r#"
-use bevy;
-let hp: bool = bevy::Shooter::set_player_health(77);
-let enemy: bool = bevy::Shooter::spawn_enemy("ace", 55, "wave", 0, 470);
-let reward: bool = bevy::Shooter::spawn_reward("health", 25, 40, -360);
-true;
-"#;
-        let mut app = App::new();
-        app.insert_resource(Score(3))
-            .insert_resource(GameFlow::Running)
-            .insert_resource(ScriptEditor {
-                buffer: live_source.to_string(),
-                status: String::new(),
-                diagnostics: Vec::new(),
-                pending_save: true,
-                pending_restart: false,
-                jit_enabled: !cfg!(target_arch = "wasm32"),
-                jit_trace_count: 0,
-            });
-        app.world_mut().spawn((
-            Player,
-            Health(95),
-            AttackStyle("straight".to_string()),
-            AttackPower(8),
-            AttackCooldownMs(260),
-            PlayerProjectileLoadout {
-                kind: "bolt".to_string(),
-                count: 1,
-            },
-            Position { x: 0.0, y: -360.0 },
-            Velocity { x: 0.0, y: 0.0 },
-        ));
-        app.world_mut().spawn((
-            Enemy {
-                kind: "bomber".to_string(),
-            },
-            Health(42),
-            AttackStyle("burst".to_string()),
-            AttackPower(3),
-            AttackCooldownMs(1400),
-            Position { x: -40.0, y: 450.0 },
-            Velocity { x: 0.0, y: -50.0 },
-            ScriptManagedEnemy,
-        ));
-        app.world_mut().spawn((
-            RewardItem {
-                kind: "bullets".to_string(),
-                amount: 1,
-            },
-            Position {
-                x: -120.0,
-                y: -220.0,
-            },
-        ));
-        app.world_mut().spawn((
-            Position { x: 0.0, y: -80.0 },
-            Velocity { x: 0.0, y: 560.0 },
-            Projectile {
-                owner: ProjectileOwner::Player,
-                damage: 8,
-                radius: 10.0,
-                pierces: false,
-            },
-        ));
-
-        apply_pending_script(app.world_mut());
-
-        let enemies = app
-            .world_mut()
-            .query::<&Enemy>()
-            .iter(app.world())
-            .map(|enemy| enemy.kind.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(enemies.len(), 2);
-        assert!(enemies.contains(&"bomber"));
-        assert!(enemies.contains(&"ace"));
-
-        let rewards = app
-            .world_mut()
-            .query::<&RewardItem>()
-            .iter(app.world())
-            .map(|reward| reward.kind.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(rewards.len(), 2);
-        assert!(rewards.contains(&"bullets"));
-        assert!(rewards.contains(&"health"));
-
-        let projectile_count = app
-            .world_mut()
-            .query::<&Projectile>()
-            .iter(app.world())
-            .count();
-        assert_eq!(projectile_count, 1);
-    }
-
-    #[test]
     fn default_window_reserves_space_for_script_panel() {
         assert_eq!(
             default_window_size(),
@@ -3440,273 +1731,6 @@ true;
                 "enemy asset should be embedded for kind {kind}"
             );
         }
-    }
-
-    #[test]
-    fn projectile_plan_shares_advanced_projectiles_between_sides() {
-        let player_loadout = PlayerProjectileLoadout {
-            kind: "missile".to_string(),
-            count: 2,
-        };
-        let player_spread =
-            projectile_plan(ProjectileOwner::Player, "spread", 10, Some(&player_loadout));
-        assert!(
-            player_spread
-                .iter()
-                .any(|shot| shot.kind == ProjectileKind::HomingMissile)
-        );
-        assert!(player_spread.iter().all(|shot| shot.velocity.y > 0.0));
-        assert_eq!(player_spread.len(), 2);
-
-        let enemy_burst = projectile_plan(ProjectileOwner::Enemy, "burst", 10, None);
-        assert!(
-            enemy_burst
-                .iter()
-                .any(|shot| shot.kind == ProjectileKind::HomingMissile)
-        );
-
-        let enemy_wave = projectile_plan(ProjectileOwner::Enemy, "wave", 10, None);
-        assert!(
-            enemy_wave
-                .iter()
-                .any(|shot| shot.kind == ProjectileKind::Shockwave)
-        );
-
-        let player_missile = projectile_plan(
-            ProjectileOwner::Player,
-            "missile",
-            10,
-            Some(&player_loadout),
-        );
-        let enemy_missile = projectile_plan(ProjectileOwner::Enemy, "missile", 10, None);
-        assert_eq!(player_missile[0].kind, enemy_missile[0].kind);
-        assert!(player_missile[0].velocity.y > 0.0);
-        assert!(enemy_missile[0].velocity.y < 0.0);
-    }
-
-    #[test]
-    fn enemy_projectile_plan_varies_by_enemy_kind() {
-        let sniper = enemy_projectile_plan("sniper", "straight", 10);
-        assert_eq!(sniper[0].kind, ProjectileKind::Rail);
-        assert!(sniper[0].velocity.y < -800.0);
-
-        let carrier = enemy_projectile_plan("carrier", "burst", 10);
-        assert!(
-            carrier
-                .iter()
-                .any(|shot| shot.kind == ProjectileKind::HomingMissile)
-        );
-        assert!(
-            carrier
-                .iter()
-                .any(|shot| shot.kind == ProjectileKind::Plasma)
-        );
-
-        let striker = enemy_projectile_plan("striker", "straight", 10);
-        assert!(striker.iter().all(|shot| shot.kind == ProjectileKind::Flak));
-        assert!(striker.iter().all(|shot| shot.velocity.y <= -620.0));
-    }
-
-    #[test]
-    fn player_loadout_supports_new_projectile_types() {
-        let plasma = player_projectile_plan("plasma", 2, 10);
-        assert_eq!(plasma.len(), 2);
-        assert!(
-            plasma
-                .iter()
-                .all(|shot| shot.kind == ProjectileKind::Plasma)
-        );
-
-        let rail = player_projectile_plan("rail", 1, 10);
-        assert_eq!(rail[0].kind, ProjectileKind::Rail);
-        assert!(rail[0].velocity.y > 850.0);
-
-        let flak = player_projectile_plan("flak", 3, 10);
-        assert_eq!(flak.len(), 3);
-        assert!(flak.iter().all(|shot| shot.kind == ProjectileKind::Flak));
-    }
-
-    #[test]
-    fn collecting_rewards_updates_player_health_and_projectile_count() {
-        let mut app = App::new();
-        app.insert_resource(GameFlow::Running);
-        app.add_systems(Update, collect_rewards);
-        app.world_mut().spawn((
-            Player,
-            Position { x: 0.0, y: 0.0 },
-            Health(90),
-            PlayerProjectileLoadout {
-                kind: "bolt".to_string(),
-                count: 1,
-            },
-        ));
-        app.world_mut().spawn((
-            RewardItem {
-                kind: "health".to_string(),
-                amount: 20,
-            },
-            Position { x: 8.0, y: 4.0 },
-        ));
-        app.world_mut().spawn((
-            RewardItem {
-                kind: "bullets".to_string(),
-                amount: 2,
-            },
-            Position { x: -6.0, y: 4.0 },
-        ));
-
-        app.update();
-
-        let (_, health, loadout) = app
-            .world_mut()
-            .query::<(&Player, &Health, &PlayerProjectileLoadout)>()
-            .single(app.world())
-            .expect("player should remain");
-        assert_eq!(health.0, 110);
-        assert_eq!(loadout.count, 3);
-
-        let reward_count = app
-            .world_mut()
-            .query::<&RewardItem>()
-            .iter(app.world())
-            .count();
-        assert_eq!(reward_count, 0);
-    }
-
-    #[test]
-    fn player_and_enemy_hits_spawn_feedback_effects() {
-        let mut app = App::new();
-        app.insert_resource(Score(0))
-            .insert_resource(test_shooter_assets())
-            .insert_resource(GameFlow::Running)
-            .add_systems(Update, collisions);
-
-        app.world_mut()
-            .spawn((Player, Position { x: 0.0, y: 0.0 }, Health(30)));
-        app.world_mut().spawn((
-            Enemy {
-                kind: "scout".to_string(),
-            },
-            Position { x: 90.0, y: 0.0 },
-            Health(20),
-        ));
-        app.world_mut().spawn((
-            Position { x: 90.0, y: 0.0 },
-            Projectile {
-                owner: ProjectileOwner::Player,
-                damage: 4,
-                radius: 20.0,
-                pierces: false,
-            },
-        ));
-        app.world_mut().spawn((
-            Position { x: 0.0, y: 0.0 },
-            Projectile {
-                owner: ProjectileOwner::Enemy,
-                damage: 4,
-                radius: 20.0,
-                pierces: false,
-            },
-        ));
-
-        app.update();
-
-        let hit_effects = app
-            .world_mut()
-            .query::<&HitEffect>()
-            .iter(app.world())
-            .count();
-        assert_eq!(hit_effects, 2);
-    }
-
-    #[test]
-    fn defeated_enemy_spawns_explosion_animation() {
-        let mut app = App::new();
-        app.insert_resource(Score(0))
-            .insert_resource(test_shooter_assets())
-            .insert_resource(GameFlow::Running)
-            .add_systems(Update, collisions);
-
-        app.world_mut()
-            .spawn((Player, Position { x: 0.0, y: -360.0 }, Health(100)));
-        app.world_mut().spawn((
-            Enemy {
-                kind: "bomber".to_string(),
-            },
-            Position { x: 12.0, y: 140.0 },
-            Health(5),
-        ));
-        app.world_mut().spawn((
-            Position { x: 12.0, y: 140.0 },
-            Projectile {
-                owner: ProjectileOwner::Player,
-                damage: 8,
-                radius: 18.0,
-                pierces: false,
-            },
-        ));
-
-        app.update();
-
-        let (frames, lifetime) = app
-            .world_mut()
-            .query_filtered::<(&SpriteFrames, &Lifetime), With<ExplosionEffect>>()
-            .single(app.world())
-            .expect("enemy defeat should create an explosion animation");
-        assert!(frames.frames.len() >= 4);
-        assert!(lifetime.duration_ms > 250.0);
-    }
-
-    #[test]
-    fn homing_velocity_turns_toward_target() {
-        let velocity = homing_velocity_step(
-            Velocity { x: 100.0, y: 0.0 },
-            Position { x: 0.0, y: 0.0 },
-            Position { x: 0.0, y: 100.0 },
-            200.0,
-            0.5,
-        );
-
-        assert!(velocity.y > 0.0);
-        assert!(velocity.x > 0.0);
-    }
-
-    #[test]
-    fn homing_velocity_keeps_forward_axis_when_target_is_behind() {
-        let player_velocity = homing_velocity_step(
-            Velocity { x: 0.0, y: 360.0 },
-            Position { x: 0.0, y: 0.0 },
-            Position {
-                x: 120.0,
-                y: -200.0,
-            },
-            360.0,
-            1.0,
-        );
-        assert!(player_velocity.y > 0.0);
-
-        let enemy_velocity = homing_velocity_step(
-            Velocity { x: 0.0, y: -360.0 },
-            Position { x: 0.0, y: 0.0 },
-            Position {
-                x: -120.0,
-                y: 200.0,
-            },
-            360.0,
-            1.0,
-        );
-        assert!(enemy_velocity.y < 0.0);
-    }
-
-    #[test]
-    fn shockwave_radius_expands_with_age() {
-        let start = shockwave_radius_at(0.0, 600.0, 18.0, 96.0);
-        let middle = shockwave_radius_at(300.0, 600.0, 18.0, 96.0);
-        let end = shockwave_radius_at(600.0, 600.0, 18.0, 96.0);
-
-        assert_eq!(start, 18.0);
-        assert!(middle > start);
-        assert_eq!(end, 96.0);
     }
 
     #[test]

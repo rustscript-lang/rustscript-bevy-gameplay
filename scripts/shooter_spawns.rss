@@ -1,0 +1,25 @@
+use bevy;
+
+// Timers and kill thresholds belong to RSS; the host only stores rule data.
+let count = bevy::Shooter::rule_count();
+let mut i = 0;
+while i < count {
+    let interval = bevy::Shooter::rule_get(i, "interval");
+    if interval > 0.0 {
+        let mut elapsed = bevy::Shooter::rule_get(i, "elapsed") + bevy::Shooter::get(-1, "delta_ms");
+        while elapsed >= interval {
+            bevy::Shooter::rule_spawn(i);
+            elapsed = elapsed - interval;
+        }
+        bevy::Shooter::rule_set(i, "elapsed", elapsed);
+    } else if bevy::Shooter::rule_get(i, "fired") == 0.0 {
+        let seen = bevy::Shooter::rule_get(i, "seen") + bevy::Shooter::get(-1, "kills_delta");
+        bevy::Shooter::rule_set(i, "seen", seen);
+        if seen >= bevy::Shooter::rule_get(i, "kills") {
+            bevy::Shooter::rule_spawn(i);
+            bevy::Shooter::rule_set(i, "fired", 1.0);
+        }
+    }
+    i = i + 1;
+}
+true;

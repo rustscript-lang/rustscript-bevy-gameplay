@@ -14,6 +14,11 @@ use vm::{
 pub(crate) use vm::{Value, Vm, VmResult};
 
 pub mod cooperative_debug;
+pub mod shooter_runtime;
+pub use shooter_runtime::{
+    ShooterData, ShooterEffects, ShooterFrame, ShooterProjectile, debug_shooter_script,
+    run_shooter_frame_script, snapshot_shooter_world,
+};
 
 /// Frozen `rustscript-lang/rustscript` revision this crate is pinned to.
 pub const FROZEN_RUSTSCRIPT_REV: &str = "805991cfc6d81e7b9d6c042a222ecf70e3f2dab0";
@@ -372,6 +377,7 @@ pub fn apply_scripted_damage(
 pub fn apply_shooter_script(world: &mut World, source: &str) -> Result<ShooterSummary, String> {
     compile_bevy_source(source)?;
     world.insert_resource(ShooterSpawnRules::default());
+    world.insert_resource(shooter_runtime::ShooterRuleClocks::default());
     let (_, jit) = with_shooter_context(world, || run_shooter_script(source))?;
     summarize_shooter_world(world, jit)
 }
@@ -637,78 +643,18 @@ pub fn tick_shooter_spawn_rules(
     delta_ms: i64,
     kills_delta: i64,
 ) -> ShooterRuleTickSummary {
-    let mut enemy_spawns = Vec::new();
-    let mut reward_spawns = Vec::new();
-    let delta_ms = delta_ms.max(0);
-    let kills_delta = kills_delta.max(0);
-
-    if let Some(mut rules) = world.get_resource_mut::<ShooterSpawnRules>() {
-        for rule in &mut rules.enemies {
-            let spawn_count = rule.trigger.consume_spawns(delta_ms, kills_delta);
-            for _ in 0..spawn_count {
-                enemy_spawns.push(rule.clone());
-            }
-        }
-        for rule in &mut rules.rewards {
-            let spawn_count = rule.trigger.consume_spawns(delta_ms, kills_delta);
-            for _ in 0..spawn_count {
-                reward_spawns.push(rule.clone());
-            }
-        }
-    }
-
-    for rule in &enemy_spawns {
-        spawn_enemy_entity(
-            world,
-            &rule.kind,
-            rule.health,
-            &rule.attack_style,
-            rule.x,
-            rule.y,
-        );
-    }
-    for rule in &reward_spawns {
-        spawn_reward_entity(world, &rule.kind, rule.amount, rule.x, rule.y);
-    }
-
+    let enemies_before = world.query::<&Enemy>().iter(world).count();
+    let rewards_before = world.query::<&RewardItem>().iter(world).count();
+    let mut frame = world.get_resource_or_insert_with(ShooterFrame::default);
+    frame.0.insert("delta_ms".into(), delta_ms.max(0) as f64);
+    frame
+        .0
+        .insert("kills_delta".into(), kills_delta.max(0) as f64);
+    run_shooter_frame_script(world, include_str!("../scripts/shooter_spawns.rss"))
+        .expect("embedded shooter spawn script should run");
     ShooterRuleTickSummary {
-        enemies_spawned: enemy_spawns.len(),
-        rewards_spawned: reward_spawns.len(),
-    }
-}
-
-impl ShooterSpawnTrigger {
-    fn consume_spawns(&mut self, delta_ms: i64, kills_delta: i64) -> usize {
-        match self {
-            Self::EveryMs {
-                interval_ms,
-                elapsed_ms,
-            } => {
-                let interval = (*interval_ms).max(1);
-                *elapsed_ms += delta_ms;
-                let spawn_count = (*elapsed_ms / interval).max(0) as usize;
-                if spawn_count > 0 {
-                    *elapsed_ms %= interval;
-                }
-                spawn_count
-            }
-            Self::AfterKills {
-                kill_count,
-                kills_seen,
-                fired,
-            } => {
-                if *fired {
-                    return 0;
-                }
-                *kills_seen += kills_delta;
-                if *kills_seen >= (*kill_count).max(1) {
-                    *fired = true;
-                    1
-                } else {
-                    0
-                }
-            }
-        }
+        enemies_spawned: world.query::<&Enemy>().iter(world).count() - enemies_before,
+        rewards_spawned: world.query::<&RewardItem>().iter(world).count() - rewards_before,
     }
 }
 
@@ -813,13 +759,13 @@ fn spawn_enemy_entity(
             },
             Health(health),
             AttackStyle(attack_style.to_string()),
-            AttackPower((health / 14).max(2)),
+            AttackPower(0),
             AttackCooldownMs(1400),
             Position {
                 x: x as f32,
                 y: y as f32,
             },
-            Velocity { x: 0.0, y: -50.0 },
+            Velocity { x: 0.0, y: 0.0 },
             ScriptManagedEnemy,
         ))
         .id()
@@ -1333,6 +1279,20 @@ fn bevy_shooter_host_module() -> HostModuleDescriptor {
             host::bevy::shooter_spawn_enemy_every_descriptor,
             host::bevy::shooter_spawn_reward_every_descriptor,
             host::bevy::shooter_spawn_enemy_after_kills_descriptor,
+            shooter_runtime::host::entities_descriptor,
+            shooter_runtime::host::entity_count_descriptor,
+            shooter_runtime::host::get_descriptor,
+            shooter_runtime::host::set_descriptor,
+            shooter_runtime::host::text_descriptor,
+            shooter_runtime::host::projectile_descriptor,
+            shooter_runtime::host::despawn_descriptor,
+            shooter_runtime::host::mark_hit_descriptor,
+            shooter_runtime::host::effect_descriptor,
+            shooter_runtime::host::rule_count_descriptor,
+            shooter_runtime::host::rule_get_descriptor,
+            shooter_runtime::host::rule_set_descriptor,
+            shooter_runtime::host::rule_spawn_descriptor,
+            shooter_runtime::host::reward_descriptor,
         ],
         resources: &[],
     }
@@ -1422,6 +1382,19 @@ fn bind_composed_bevy_hosts(vm: &mut Vm) -> Result<(), String> {
     let catalog = bevy_host_catalog();
     let mut registry = HostFunctionRegistry::restricted();
     install_bevy_host_modules(&mut registry, catalog.as_ref()).map_err(|err| err.to_string())?;
+    for name in [
+        "math::sqrt",
+        "math::sin",
+        "math::cos",
+        "math::abs",
+        "math::min",
+        "math::max",
+        "math::floor",
+    ] {
+        registry
+            .allow_builtin(name)
+            .map_err(|err| err.to_string())?;
+    }
     registry.bind_vm_cached(vm).map_err(|err| err.to_string())
 }
 

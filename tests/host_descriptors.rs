@@ -20,9 +20,9 @@ use vm::{
 /// lowercase hex digits). Bump together with [`BEVY_HOST_CATALOG_FINGERPRINT_U64`]
 /// when the guest catalog surface or frozen pd-vm fingerprint encoding changes.
 /// See [`bevy_host_catalog`] for the full policy.
-const BEVY_HOST_CATALOG_FINGERPRINT_HEX: &str = "61e3eaf5de92afc7";
+const BEVY_HOST_CATALOG_FINGERPRINT_HEX: &str = "c4b1c4887b21bd02";
 /// Exact `u64` form of the same digest. Keep in lockstep with the hex snapshot.
-const BEVY_HOST_CATALOG_FINGERPRINT_U64: u64 = 0x61e3eaf5de92afc7;
+const BEVY_HOST_CATALOG_FINGERPRINT_U64: u64 = 0xc4b1c4887b21bd02;
 
 const LISTED_HOST_SOURCE: &str = "use bevy;\nbevy::World::contains_entity();\n";
 const UNLISTED_HOST_SOURCE: &str = "use bevy;\nbevy::World::not_a_host();\n";
@@ -43,6 +43,20 @@ const EXPECTED_HOST_NAMES: &[&str] = &[
     "bevy::Shooter::spawn_enemy_every",
     "bevy::Shooter::spawn_reward_every",
     "bevy::Shooter::spawn_enemy_after_kills",
+    "bevy::Shooter::entities",
+    "bevy::Shooter::entity_count",
+    "bevy::Shooter::get",
+    "bevy::Shooter::set",
+    "bevy::Shooter::text",
+    "bevy::Shooter::projectile",
+    "bevy::Shooter::despawn",
+    "bevy::Shooter::mark_hit",
+    "bevy::Shooter::effect",
+    "bevy::Shooter::rule_count",
+    "bevy::Shooter::rule_get",
+    "bevy::Shooter::rule_set",
+    "bevy::Shooter::rule_spawn",
+    "bevy::Shooter::reward",
     "bevy::Gomoku::board",
     "bevy::Gomoku::board_size",
     "bevy::Gomoku::cell",
@@ -489,7 +503,11 @@ fn bundled_rss_examples_compile_through_the_production_catalog() {
             "damage_formula.rss",
             "gomoku_ai.rss",
             "gomoku_move.rss",
+            "shooter_flow.rss",
             "shooter_game.rss",
+            "shooter_planes.rss",
+            "shooter_projectiles.rss",
+            "shooter_spawns.rss",
             "xiangqi_ai.rss",
             "xiangqi_move.rss",
         ]

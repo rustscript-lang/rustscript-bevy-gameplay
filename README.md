@@ -18,13 +18,27 @@ RustScript core is pinned to `805991cfc6d81e7b9d6c042a222ecf70e3f2dab0` through 
 
 This repo demonstrates three playable Bevy examples whose gameplay rules are driven by live RustScript:
 
-- **Shooter**: a vertical scrolling shooter with textured ships, enemy waves, rewards, player health, different projectile patterns, missiles, shockwaves, pause/restart controls, and a live script panel that can change the running world without recreating spawned entities.
+- **Shooter**: a vertical scrolling shooter whose movement, aircraft behavior, fire patterns, projectile physics, homing, shockwaves, collisions, rewards, scoring, game-over rules, and spawn timers run in RSS. Its five-tab live editor shares Gomoku's linting, automatic apply, breakpoints, stepping, locals, hover inspection, and debug console.
 - **Gomoku**: a human-vs-AI board game where move legality, win detection, and AI move selection are implemented in RustScript. The UI supports live editing, save/load of board state plus scripts, AI assist, AI bias, JIT trace telemetry, and debugger controls.
 - **Xiangqi**: a Chinese chess game with board rendering, piece artwork, scripted legal-move validation, scripted AI move selection, save/load, AI assist, AI bias, JIT telemetry, and the same live debugging workflow.
 
 Across the examples, Bevy keeps the rendering and ECS shell compiled while RustScript owns the parts that are useful to tune during development: gameplay rules, AI behavior, spawn schedules, rewards, and balancing constants. The editor can lint scripts as you type, apply changes after a short cooldown, reset to embedded defaults, pause in a debugger, step through code, inspect locals, use breakpoints, and interact through the debug console. The VM runs with JIT enabled and exposes trace counts in the game UI so script performance work is visible while playing.
 
 Assets and scripts are embedded into the binaries, so release packages do not need external `assets/` or `scripts/` directories.
+
+Shooter's editable scripts are:
+
+| File | Responsibility |
+| --- | --- |
+| `shooter_game.rss` | Initial loadout, enemy wave, rewards, spawn-rule registration |
+| `shooter_flow.rss` | Player movement, pickup effects and health/ammunition limits |
+| `shooter_planes.rss` | Aircraft trajectories, enemy power and fire clocks |
+| `shooter_projectiles.rss` | Eight projectile types, firing patterns, guidance, lifetime, collision, damage, drops and score |
+| `shooter_spawns.rss` | Repeating timers and one-shot kill thresholds |
+
+Rust provides ECS data access, input, rendering and VM invocation. Frame scripts reuse compiled VMs and JIT traces. Edits with lint errors retain the previous working source; a runtime error pauses gameplay and reports the affected tab. Initialization edits apply to the live world, while Restart clears runtime state and reapplies the initialization script.
+
+On desktop or in the browser, select any Shooter tab and press **Debug**. Gameplay pauses while that script runs against a snapshot of the current ECS world. **Step**, **Next**, **Continue**, **Locals**, gutter breakpoints and the console work through the shared debugger bridge. **Stop** releases the debug session and restores the prior gameplay state. Debug evaluation preserves the live world. The browser debugger advances in bounded VM slices so the editor remains responsive.
 
 ## Run
 

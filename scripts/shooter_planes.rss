@@ -1,0 +1,126 @@
+use bevy;
+use math;
+
+fn clamp(value: float, low: float, high: float) -> float {
+    if value < low => { low } else => {
+        if value > high => { high } else => { value }
+    }
+}
+
+let ids: [int] = bevy::Shooter::entities();
+let count = bevy::Shooter::entity_count();
+let delta_ms = bevy::Shooter::get(-1, "delta_ms");
+let dt = delta_ms / 1000.0;
+let mut i = 0;
+while i < count {
+    let id = (&ids)[i];
+    let role = bevy::Shooter::text(id, "role");
+    if role == "player" || role == "enemy" {
+        let kind = bevy::Shooter::text(id, "kind");
+        let style = bevy::Shooter::text(id, "style");
+        let mut cooldown = bevy::Shooter::get(id, "cooldown");
+        if role == "enemy" {
+            cooldown = 1500.0;
+            if style == "burst" { cooldown = 1200.0; }
+            if kind == "sniper" { cooldown = 1850.0; }
+            if kind == "striker" { cooldown = 980.0; }
+            if kind == "carrier" { cooldown = 1350.0; }
+            let mut descent = 58.0;
+            let mut lateral = 28.0;
+            let mut secondary = 8.0;
+            let mut frequency = 1.8;
+            let mut phase = 0.15;
+            let mut drift = 0.0;
+            if kind == "bomber" {
+                descent = 42.0;
+                lateral = 44.0;
+                secondary = 10.0;
+                frequency = 1.15;
+                phase = 0.9;
+                drift = -8.0;
+            }
+            if kind == "weaver" || kind == "ace" {
+                descent = 48.0;
+                lateral = 92.0;
+                secondary = 22.0;
+                frequency = 2.8;
+                phase = 1.8;
+                drift = 0.0;
+            }
+            if kind == "tank" {
+                descent = 30.0;
+                lateral = 8.0;
+                secondary = 0.0;
+                frequency = 0.8;
+                phase = 2.4;
+                drift = 0.0;
+            }
+            if kind == "sniper" {
+                descent = 34.0;
+                lateral = 118.0;
+                secondary = 18.0;
+                frequency = 0.95;
+                phase = 0.35;
+                drift = 0.0;
+            }
+            if kind == "carrier" {
+                descent = 36.0;
+                lateral = 58.0;
+                secondary = 28.0;
+                frequency = 1.45;
+                phase = 2.1;
+                drift = 6.0;
+            }
+            if kind == "striker" {
+                descent = 82.0;
+                lateral = 70.0;
+                secondary = 26.0;
+                frequency = 2.35;
+                phase = 1.25;
+                drift = 18.0;
+            }
+            if kind == "boss" {
+                descent = 22.0;
+                lateral = 76.0;
+                secondary = 34.0;
+                frequency = 0.62;
+                phase = 2.8;
+                drift = 0.0;
+            }
+            if style == "burst" { descent = descent + 10.0; frequency = frequency * 0.88; }
+            if style == "wave" { descent = clamp(descent - 5.0, 18.0, 200.0); lateral = lateral + 28.0; frequency = frequency * 1.18; }
+            if style == "missile" || style == "homing" { descent = descent - 3.0; drift = drift + 10.0; }
+            if style == "rail" || style == "laser" { descent = descent - 6.0; lateral = lateral + 18.0; }
+            let age = bevy::Shooter::get(id, "age") + dt;
+            let mut anchor = bevy::Shooter::get(id, "anchor");
+            if bevy::Shooter::get(id, "initialized") == 0.0 {
+                anchor = bevy::Shooter::get(id, "x");
+                bevy::Shooter::set(id, "anchor", anchor);
+                bevy::Shooter::set(id, "initialized", 1.0);
+                bevy::Shooter::set(id, "power", math::max(2.0, math::floor(bevy::Shooter::get(id, "health") / 14.0)));
+            }
+            bevy::Shooter::set(id, "age", age);
+            let weave = math::sin(age * frequency + phase + anchor * 0.011);
+            let counter = math::cos(age * frequency * 0.47 + phase * 0.5);
+            let mut dive = 0.0;
+            if kind == "striker" { dive = math::max(0.0, math::sin(age * 4.0 + phase)) * 34.0; }
+            let vx = drift + weave * lateral + counter * secondary;
+            let vy = -(descent + dive);
+            bevy::Shooter::set(id, "vx", vx);
+            bevy::Shooter::set(id, "vy", vy);
+            bevy::Shooter::set(id, "x", clamp(bevy::Shooter::get(id, "x") + vx * dt, -228.0, 228.0));
+            let y = bevy::Shooter::get(id, "y") + vy * dt;
+            bevy::Shooter::set(id, "y", y);
+            if y < -640.0 { bevy::Shooter::despawn(id); }
+        }
+        let clock = bevy::Shooter::get(id, "fire_clock") + delta_ms;
+        bevy::Shooter::set(id, "fire_clock", clock);
+        bevy::Shooter::set(id, "fire", 0.0);
+        if clock >= cooldown && bevy::Shooter::get(id, "health") > 0.0 {
+            bevy::Shooter::set(id, "fire_clock", 0.0);
+            bevy::Shooter::set(id, "fire", 1.0);
+        }
+    }
+    i = i + 1;
+}
+true;

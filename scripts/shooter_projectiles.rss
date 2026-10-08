@@ -1,0 +1,303 @@
+use bevy;
+use math;
+
+fn shot(owner: string, kind: string, origin_x: float, origin_y: float, vx: float, vy: float, damage: float) -> bool {
+    let mut radius = 16.0;
+    let mut scale = 1.25;
+    let mut speed = 520.0;
+    let mut offset = 34.0;
+    let mut frame_ms = 90.0;
+    let mut pulse = 0.08;
+    let mut spin = 0.0;
+    let mut pierces = 0.0;
+    let mut lifetime = 0.0;
+    if kind == "bolt" {
+        radius = 16.0;
+        scale = 1.25;
+        speed = 520.0;
+        offset = 34.0;
+        frame_ms = 90.0;
+        pulse = 0.08;
+        spin = 0.0;
+        pierces = 0.0;
+        lifetime = 0.0;
+    }
+    if kind == "spread" {
+        radius = 14.0;
+        scale = 1.05;
+        speed = 500.0;
+        offset = 34.0;
+        frame_ms = 80.0;
+        pulse = 0.1;
+        spin = 0.0;
+        pierces = 0.0;
+        lifetime = 0.0;
+    }
+    if kind == "laser" {
+        radius = 18.0;
+        scale = 1.55;
+        speed = 760.0;
+        offset = 38.0;
+        frame_ms = 55.0;
+        pulse = 0.12;
+        spin = 0.0;
+        pierces = 1.0;
+        lifetime = 0.0;
+    }
+    if kind == "missile" {
+        radius = 20.0;
+        scale = 0.58;
+        speed = 360.0;
+        offset = 42.0;
+        frame_ms = 110.0;
+        pulse = 0.04;
+        spin = 0.0;
+        pierces = 0.0;
+        lifetime = 0.0;
+    }
+    if kind == "shockwave" {
+        radius = 18.0;
+        scale = 0.36;
+        speed = 0.0;
+        offset = 22.0;
+        frame_ms = 70.0;
+        pulse = 0.0;
+        spin = 0.35;
+        pierces = 1.0;
+        lifetime = 620.0;
+    }
+    if kind == "plasma" {
+        radius = 22.0;
+        scale = 1.45;
+        speed = 470.0;
+        offset = 38.0;
+        frame_ms = 70.0;
+        pulse = 0.14;
+        spin = 0.08;
+        pierces = 0.0;
+        lifetime = 0.0;
+    }
+    if kind == "flak" {
+        radius = 13.0;
+        scale = 0.95;
+        speed = 610.0;
+        offset = 32.0;
+        frame_ms = 65.0;
+        pulse = 0.08;
+        spin = 0.18;
+        pierces = 0.0;
+        lifetime = 0.0;
+    }
+    if kind == "rail" {
+        radius = 15.0;
+        scale = 1.75;
+        speed = 920.0;
+        offset = 42.0;
+        frame_ms = 45.0;
+        pulse = 0.06;
+        spin = 0.0;
+        pierces = 1.0;
+        lifetime = 0.0;
+    }
+    let sign = if owner == "player" => { 1.0 } else => { -1.0 };
+    let id = bevy::Shooter::projectile(owner, kind, origin_x, origin_y + sign * offset, vx, vy, damage);
+    bevy::Shooter::set(id, "radius", radius);
+    bevy::Shooter::set(id, "scale", scale);
+    bevy::Shooter::set(id, "speed", speed);
+    bevy::Shooter::set(id, "frame_ms", frame_ms);
+    bevy::Shooter::set(id, "pulse", pulse);
+    bevy::Shooter::set(id, "spin", spin * sign);
+    bevy::Shooter::set(id, "pierces", pierces);
+    bevy::Shooter::set(id, "lifetime", lifetime);
+    true
+}
+
+// Fire patterns are evaluated from live ship data each frame.
+let ships: [int] = bevy::Shooter::entities();
+let ship_count = bevy::Shooter::entity_count();
+let mut i = 0;
+while i < ship_count {
+    let id = (&ships)[i];
+    let owner = bevy::Shooter::text(id, "role");
+    if (owner == "player" || owner == "enemy") && bevy::Shooter::get(id, "fire") != 0.0 {
+        bevy::Shooter::set(id, "fire", 0.0);
+        let x = bevy::Shooter::get(id, "x");
+        let y = bevy::Shooter::get(id, "y");
+        let power = bevy::Shooter::get(id, "power");
+        if owner == "player" {
+            let mut kind = bevy::Shooter::text(id, "loadout");
+            if kind == "homing" { kind = "missile"; }
+            let mut damage = power;
+            let mut speed_y = 560.0;
+            if kind == "spread" { damage = power; speed_y = 520.0; }
+            if kind == "laser" { damage = power + 4.0; speed_y = 760.0; }
+            if kind == "missile" { damage = power + 6.0; speed_y = 360.0; }
+            if kind == "shockwave" { damage = math::max(4.0, math::floor(power / 2.0)); speed_y = 0.0; }
+            if kind == "plasma" { damage = power + 5.0; speed_y = 470.0; }
+            if kind == "flak" { damage = power + 1.0; speed_y = 610.0; }
+            if kind == "rail" { damage = power + 10.0; speed_y = 920.0; }
+            let count = math::min(5.0, math::max(1.0, bevy::Shooter::get(id, "count")));
+            let mut n = 0;
+            while n < count {
+                let mut lateral = 0.0;
+                if count == 2 { lateral = -55.0 + n * 110.0; }
+                if count == 3 { lateral = -95.0 + n * 95.0; }
+                if count == 4 { lateral = -120.0 + n * 80.0; }
+                if count == 5 {
+                    lateral = -135.0;
+                    if n == 1 { lateral = -70.0; }
+                    if n == 2 { lateral = 0.0; }
+                    if n == 3 { lateral = 70.0; }
+                    if n == 4 { lateral = 135.0; }
+                }
+                shot(owner, kind, x, y, lateral, speed_y, damage);
+                n = n + 1;
+            }
+        } else {
+            let kind = bevy::Shooter::text(id, "kind");
+            let style = bevy::Shooter::text(id, "style");
+            if kind == "sniper" {
+                shot(owner, "rail", x, y, 0.0, -900.0, power + 12.0);
+            } else if kind == "carrier" {
+                shot(owner, "missile", x, y, -45.0, -340.0, power + 7.0);
+                shot(owner, "plasma", x, y, 45.0, -430.0, power + 5.0);
+            } else if kind == "striker" {
+                shot(owner, "flak", x, y, -110.0, -640.0, power);
+                shot(owner, "flak", x, y, 0.0, -700.0, power);
+                shot(owner, "flak", x, y, 110.0, -640.0, power);
+            } else if style == "spread" {
+                shot(owner, "spread", x, y, -90.0, -460.0, power);
+                shot(owner, "spread", x, y, 0.0, -500.0, power);
+                shot(owner, "spread", x, y, 90.0, -460.0, power);
+                shot(owner, "missile", x, y, 0.0, -330.0, power + 5.0);
+                shot(owner, "shockwave", x, y, 0.0, 0.0, math::max(4.0, math::floor(power / 2.0)));
+            } else if style == "laser" {
+                shot(owner, "laser", x, y, 0.0, -760.0, power * 2.0);
+                shot(owner, "missile", x, y, 0.0, -360.0, power + 7.0);
+            } else if style == "burst" {
+                shot(owner, "spread", x, y, -80.0, -260.0, power);
+                shot(owner, "spread", x, y, 80.0, -260.0, power);
+                shot(owner, "missile", x, y, 0.0, -300.0, power + 4.0);
+            } else if style == "wave" {
+                shot(owner, "bolt", x, y, 120.0, -240.0, power + 2.0);
+                shot(owner, "shockwave", x, y, 0.0, 0.0, power);
+            } else if style == "missile" || style == "homing" {
+                shot(owner, "missile", x, y, 0.0, -360.0, power + 8.0);
+            } else if style == "shockwave" {
+                shot(owner, "shockwave", x, y, 0.0, 0.0, power);
+            } else if style == "plasma" {
+                shot(owner, "plasma", x, y, 0.0, -430.0, power + 6.0);
+            } else if style == "flak" {
+                shot(owner, "flak", x, y, 0.0, -520.0, power);
+            } else if style == "rail" {
+                shot(owner, "rail", x, y, 0.0, -880.0, power + 10.0);
+            } else {
+                shot(owner, "bolt", x, y, 0.0, -520.0, power);
+            }
+        }
+    }
+    i = i + 1;
+}
+
+// Movement, guidance, expanding areas, hits, damage and drops.
+let ids: [int] = bevy::Shooter::entities();
+let count = bevy::Shooter::entity_count();
+let delta_ms = bevy::Shooter::get(-1, "delta_ms");
+let dt = delta_ms / 1000.0;
+i = 0;
+while i < count {
+    let id = (&ids)[i];
+    if bevy::Shooter::text(id, "role") == "projectile" {
+        let kind = bevy::Shooter::text(id, "kind");
+        let owner = bevy::Shooter::text(id, "owner");
+        let target_role = if owner == "player" => { "enemy" } else => { "player" };
+        let mut x = bevy::Shooter::get(id, "x");
+        let mut y = bevy::Shooter::get(id, "y");
+        let mut vx = bevy::Shooter::get(id, "vx");
+        let mut vy = bevy::Shooter::get(id, "vy");
+        let age = bevy::Shooter::get(id, "age_ms") + delta_ms;
+        bevy::Shooter::set(id, "age_ms", age);
+        if kind == "missile" {
+            let mut best = 1000000000000.0;
+            let mut target = -1;
+            let mut j = 0;
+            while j < count {
+                let other = (&ids)[j];
+                if bevy::Shooter::text(other, "role") == target_role && bevy::Shooter::get(other, "health") > 0.0 {
+                    let dx = bevy::Shooter::get(other, "x") - x;
+                    let dy = bevy::Shooter::get(other, "y") - y;
+                    let distance = dx * dx + dy * dy;
+                    if distance < best { best = distance; target = other; }
+                }
+                j = j + 1;
+            }
+            if target != -1 && best > 0.0 {
+                let length = math::sqrt(best);
+                let mut dx = (bevy::Shooter::get(target, "x") - x) / length;
+                let mut dy = (bevy::Shooter::get(target, "y") - y) / length;
+                let sign = if vy >= 0.0 => { 1.0 } else => { -1.0 };
+                if dy * sign < 0.0 {
+                    dy = sign * math::max(0.08, 1.0 - math::abs(dx));
+                    let norm = math::sqrt(dx * dx + dy * dy);
+                    dx = dx / norm; dy = dy / norm;
+                }
+                let amount = math::min(1.0, 3.2 * dt);
+                let speed = bevy::Shooter::get(id, "speed");
+                vx = vx + (dx * speed - vx) * amount;
+                vy = vy + (dy * speed - vy) * amount;
+                bevy::Shooter::set(id, "vx", vx);
+                bevy::Shooter::set(id, "vy", vy);
+            }
+        }
+        x = x + vx * dt; y = y + vy * dt;
+        bevy::Shooter::set(id, "x", x);
+        bevy::Shooter::set(id, "y", y);
+        let lifetime = bevy::Shooter::get(id, "lifetime");
+        if (lifetime > 0.0 && age >= lifetime) || x < -400.0 || x > 400.0 || y < -680.0 || y > 680.0 {
+            bevy::Shooter::despawn(id);
+        } else {
+            if kind == "shockwave" {
+                let t = math::min(1.0, age / lifetime);
+                bevy::Shooter::set(id, "radius", 18.0 + 78.0 * t);
+                bevy::Shooter::set(id, "scale", 0.36 + 1.64 * t);
+            }
+            let radius = bevy::Shooter::get(id, "radius");
+            let damage = bevy::Shooter::get(id, "damage");
+            let mut j = 0;
+            let mut consumed = false;
+            while j < count && !consumed {
+                let target = (&ids)[j];
+                if bevy::Shooter::text(target, "role") == target_role && bevy::Shooter::get(target, "health") > 0.0 {
+                    let tx = bevy::Shooter::get(target, "x");
+                    let ty = bevy::Shooter::get(target, "y");
+                    let dx = tx - x; let dy = ty - y;
+                    if dx * dx + dy * dy <= radius * radius && bevy::Shooter::mark_hit(id, target) {
+                        let hp = math::max(0.0, bevy::Shooter::get(target, "health") - damage);
+                        bevy::Shooter::set(target, "health", hp);
+                        bevy::Shooter::effect("hit_" + owner, tx, ty);
+                        if target_role == "enemy" && hp == 0.0 {
+                            let enemy_kind = bevy::Shooter::text(target, "kind");
+                            let mut reward = "bullets";
+                            let mut amount = 1.0;
+                            if enemy_kind == "tank" { reward = "health"; amount = 20.0; }
+                            if enemy_kind == "boss" { reward = "health"; amount = 35.0; }
+                            if enemy_kind == "bomber" || enemy_kind == "carrier" { amount = 2.0; }
+                            bevy::Shooter::reward(reward, amount, tx, ty);
+                            bevy::Shooter::effect("explosion_" + enemy_kind, tx, ty);
+                            bevy::Shooter::despawn(target);
+                            bevy::Shooter::set(-1, "score", bevy::Shooter::get(-1, "score") + 1.0);
+                            bevy::Shooter::set(-1, "kills_delta", bevy::Shooter::get(-1, "kills_delta") + 1.0);
+                        }
+                        if target_role == "player" && hp == 0.0 { bevy::Shooter::set(-1, "game_over", 1.0); }
+                        if bevy::Shooter::get(id, "pierces") == 0.0 {
+                            bevy::Shooter::despawn(id); consumed = true;
+                        }
+                    }
+                }
+                j = j + 1;
+            }
+        }
+    }
+    i = i + 1;
+}
+true;
