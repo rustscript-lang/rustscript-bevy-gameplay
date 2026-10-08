@@ -1,0 +1,57 @@
+name: Pages
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm-pages
+      - name: Install matching wasm-bindgen CLI
+        run: |
+          VERSION=$(python -c 'import tomllib; print(next(p["version"] for p in tomllib.load(open("Cargo.lock", "rb"))["package"] if p["name"] == "wasm-bindgen"))')
+          ARCHIVE="wasm-bindgen-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl --fail --location --retry 3 "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${VERSION}/${ARCHIVE}" -o "$RUNNER_TEMP/$ARCHIVE"
+          curl --fail --location --retry 3 "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${VERSION}/${ARCHIVE}.sha256sum" -o "$RUNNER_TEMP/wasm-bindgen.sha256sum"
+          cd "$RUNNER_TEMP"
+          sed 's|gh-release/||' wasm-bindgen.sha256sum | sha256sum --check
+          tar -xzf "$ARCHIVE"
+          echo "$RUNNER_TEMP/wasm-bindgen-${VERSION}-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+      - name: Build three games and static site
+        run: python tools/build_web.py
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/web
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

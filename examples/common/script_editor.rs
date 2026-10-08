@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex, mpsc::Receiver},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use bevy_egui::egui;
@@ -9,6 +9,7 @@ use rustscript_bevy_gameplay::compile_bevy_script;
 #[cfg(test)]
 use vm::compile_source;
 use vm::{DebugCommandBridge, DebugCommandBridgeError, SourceError, SourceMap, SourcePathError};
+use web_time::Instant;
 
 const CODE_FONT_SIZE: f32 = 13.0;
 
@@ -427,6 +428,9 @@ impl LiveScriptEditor {
         ui.set_width(panel_width);
         ui.heading("Live RustScript");
         ui.add_space(6.0);
+        if cfg!(target_arch = "wasm32") {
+            ui.small("Web mode: live editing enabled; thread debugger requires desktop.");
+        }
 
         let active = self.active.min(self.tabs.len().saturating_sub(1));
         ui.horizontal_wrapped(|ui| {
@@ -442,7 +446,10 @@ impl LiveScriptEditor {
             };
             if ui
                 .add_enabled(
-                    !self.debug_starting && !self.debug_attached && !self.debug_pending,
+                    !cfg!(target_arch = "wasm32")
+                        && !self.debug_starting
+                        && !self.debug_attached
+                        && !self.debug_pending,
                     egui::Button::new(debug_label),
                 )
                 .clicked()

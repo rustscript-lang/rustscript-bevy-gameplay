@@ -1,2 +1,5 @@
 /target
 .cargo/
+/dist/
+/output/
+/.playwright-cli/

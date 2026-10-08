@@ -58,6 +58,7 @@ fn default_window_size() -> UVec2 {
 }
 
 fn main() {
+    #[cfg(not(target_arch = "wasm32"))]
     if std::env::args().any(|arg| arg == "--script-smoke") {
         run_script_smoke();
         return;
@@ -68,6 +69,9 @@ fn main() {
             primary_window: Some(Window {
                 title: "RustScript Bevy Shooter".to_string(),
                 resolution: default_window_size().into(),
+                canvas: Some("#game-canvas".into()),
+                fit_canvas_to_parent: true,
+                prevent_default_event_handling: true,
                 ..default()
             }),
             ..default()
@@ -83,7 +87,7 @@ fn main() {
             diagnostics: Vec::new(),
             pending_save: true,
             pending_restart: false,
-            jit_enabled: true,
+            jit_enabled: !cfg!(target_arch = "wasm32"),
             jit_trace_count: 0,
         })
         .add_systems(Startup, setup)
@@ -3121,7 +3125,7 @@ true;
                 diagnostics: Vec::new(),
                 pending_save: true,
                 pending_restart: false,
-                jit_enabled: true,
+                jit_enabled: !cfg!(target_arch = "wasm32"),
                 jit_trace_count: 0,
             });
         app.world_mut().spawn((

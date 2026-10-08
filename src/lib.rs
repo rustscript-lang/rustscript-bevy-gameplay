@@ -2,8 +2,8 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     sync::{Arc, OnceLock},
-    time::Instant,
 };
+use web_time::Instant;
 
 use bevy_ecs::prelude::*;
 use vm::{
@@ -14,7 +14,7 @@ use vm::{
 pub(crate) use vm::{Value, Vm, VmResult};
 
 /// Frozen `rustscript-lang/rustscript` revision this crate is pinned to.
-pub const FROZEN_RUSTSCRIPT_REV: &str = "b1d6cffede77f49410bf63525f30b9a46b02dc01";
+pub const FROZEN_RUSTSCRIPT_REV: &str = "805991cfc6d81e7b9d6c042a222ecf70e3f2dab0";
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Health(pub i64);
@@ -1237,7 +1237,7 @@ fn run_xiangqi_script_with_debugger(
 
 fn shooter_jit_config() -> JitConfig {
     JitConfig {
-        enabled: true,
+        enabled: !cfg!(target_arch = "wasm32"),
         hot_loop_threshold: 1,
         max_trace_len: 512,
     }
@@ -1245,7 +1245,7 @@ fn shooter_jit_config() -> JitConfig {
 
 fn gomoku_jit_config() -> JitConfig {
     JitConfig {
-        enabled: true,
+        enabled: !cfg!(target_arch = "wasm32"),
         hot_loop_threshold: 8,
         max_trace_len: 2_048,
     }
@@ -1253,7 +1253,7 @@ fn gomoku_jit_config() -> JitConfig {
 
 fn xiangqi_jit_config() -> JitConfig {
     JitConfig {
-        enabled: true,
+        enabled: !cfg!(target_arch = "wasm32"),
         hot_loop_threshold: 32,
         max_trace_len: 2_048,
     }

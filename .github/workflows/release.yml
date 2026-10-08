@@ -46,12 +46,6 @@ jobs:
         with:
           path: rustscript-bevy-gameplay
 
-      - name: Checkout RustScript / pd-vm
-        uses: actions/checkout@v4
-        with:
-          repository: rustscript-lang/rustscript
-          path: rustscript
-
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         run: |

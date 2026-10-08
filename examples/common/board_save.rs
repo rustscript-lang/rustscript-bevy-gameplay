@@ -1,5 +1,8 @@
-use std::{fs, path::PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs;
+use std::path::PathBuf;
 
+#[cfg(not(target_arch = "wasm32"))]
 const BOARD_SAVE_EXTENSION: &str = "rssboard";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +20,7 @@ pub struct BoardSavePackage {
     pub redo_history: Vec<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_board_file(
     dialog_title: &str,
     default_file_name: &str,
@@ -38,6 +42,7 @@ pub fn save_board_file(
     Ok(Some(path))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_board_file(dialog_title: &str) -> Result<Option<(PathBuf, String)>, String> {
     let Some(path) = rfd::FileDialog::new()
         .set_title(dialog_title)
@@ -49,6 +54,46 @@ pub fn load_board_file(dialog_title: &str) -> Result<Option<(PathBuf, String)>, 
     let contents = fs::read_to_string(&path)
         .map_err(|err| format!("could not read {}: {err}", path.display()))?;
     Ok(Some((path, contents)))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_storage() -> Result<web_sys::Storage, String> {
+    web_sys::window()
+        .ok_or("browser window unavailable")?
+        .local_storage()
+        .map_err(|err| format!("browser storage unavailable: {err:?}"))?
+        .ok_or_else(|| "browser storage disabled".into())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn save_board_file(
+    dialog_title: &str,
+    default_file_name: &str,
+    contents: &str,
+) -> Result<Option<PathBuf>, String> {
+    let key = browser_save_key(dialog_title);
+    browser_storage()?
+        .set_item(key, contents)
+        .map_err(|err| format!("could not save in this browser: {err:?}"))?;
+    Ok(Some(PathBuf::from(default_file_name)))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_save_key(title: &str) -> &'static str {
+    if title.contains("Xiangqi") {
+        "rustscript-xiangqi-board"
+    } else {
+        "rustscript-gomoku-board"
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn load_board_file(dialog_title: &str) -> Result<Option<(PathBuf, String)>, String> {
+    let key = browser_save_key(dialog_title);
+    browser_storage()?
+        .get_item(key)
+        .map(|saved| saved.map(|contents| (PathBuf::from("browser.rssboard"), contents)))
+        .map_err(|err| format!("could not load from this browser: {err:?}"))
 }
 
 pub fn display_file_name(path: &std::path::Path) -> String {

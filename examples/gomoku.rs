@@ -3,8 +3,10 @@
 use std::{
     sync::{Arc, Mutex, mpsc},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use bevy::{
     prelude::*,
@@ -73,7 +75,7 @@ impl Default for GomokuUiState {
             winner: 0,
             draw: false,
             last_ai_move: None,
-            jit_enabled: true,
+            jit_enabled: !cfg!(target_arch = "wasm32"),
             jit_trace_count: 0,
             last_ai_move_micros: None,
             board_io_status: String::new(),
@@ -128,6 +130,7 @@ impl Default for GomokuScripts {
 }
 
 fn main() {
+    #[cfg(not(target_arch = "wasm32"))]
     if std::env::args().any(|arg| arg == "--script-smoke") {
         run_script_smoke();
         return;
@@ -148,6 +151,9 @@ fn main() {
                         title: "RustScript Gomoku".to_string(),
                         resolution: WindowResolution::new(window_width, window_height),
                         resizable: true,
+                        canvas: Some("#game-canvas".into()),
+                        fit_canvas_to_parent: true,
+                        prevent_default_event_handling: true,
                         ..default()
                     }),
                     ..default()
@@ -263,7 +269,7 @@ fn gomoku_ui(world: &mut World) {
     let history = world.resource::<GomokuHistory>().clone();
     let mut state = world.resource::<GomokuUiState>().clone();
     let mut scripts = world.remove_resource::<GomokuScripts>().unwrap_or_default();
-    scripts.editor.update_auto_apply(std::time::Instant::now());
+    scripts.editor.update_auto_apply(Instant::now());
     if let Some(session) = scripts.debug_session.as_mut() {
         session.poll(&mut scripts.editor);
     }

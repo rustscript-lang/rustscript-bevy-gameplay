@@ -3,8 +3,10 @@
 use std::{
     sync::{Arc, Mutex, mpsc},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use bevy::{
     prelude::*,
@@ -73,7 +75,7 @@ impl Default for XiangqiUiState {
             last_ai_takeover_move_at: None,
             winner: 0,
             last_ai_move: None,
-            jit_enabled: true,
+            jit_enabled: !cfg!(target_arch = "wasm32"),
             jit_trace_count: 0,
             last_ai_move_micros: None,
             fonts_ready: false,
@@ -128,6 +130,7 @@ impl Default for XiangqiScripts {
 }
 
 fn main() {
+    #[cfg(not(target_arch = "wasm32"))]
     if std::env::args().any(|arg| arg == "--script-smoke") {
         run_script_smoke();
         return;
@@ -148,6 +151,9 @@ fn main() {
                         title: "RustScript Xiangqi".to_string(),
                         resolution: WindowResolution::new(window_width, window_height),
                         resizable: true,
+                        canvas: Some("#game-canvas".into()),
+                        fit_canvas_to_parent: true,
+                        prevent_default_event_handling: true,
                         ..default()
                     }),
                     ..default()
@@ -269,7 +275,7 @@ fn xiangqi_ui(world: &mut World) {
     let mut scripts = world
         .remove_resource::<XiangqiScripts>()
         .unwrap_or_default();
-    scripts.editor.update_auto_apply(std::time::Instant::now());
+    scripts.editor.update_auto_apply(Instant::now());
     if let Some(session) = scripts.debug_session.as_mut() {
         session.poll(&mut scripts.editor);
     }
@@ -1404,6 +1410,15 @@ fn install_cjk_font(ctx: &egui::Context) -> bool {
     true
 }
 
+#[cfg(target_arch = "wasm32")]
+fn load_system_cjk_font() -> Option<(Vec<u8>, u32)> {
+    Some((
+        include_bytes!("../assets/fonts/xiangqi-cjk.otf").to_vec(),
+        0,
+    ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn load_system_cjk_font() -> Option<(Vec<u8>, u32)> {
     let mut database = fontdb::Database::new();
     database.load_system_fonts();

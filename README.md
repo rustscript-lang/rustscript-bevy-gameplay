@@ -2,6 +2,10 @@
 
 Standalone Bevy integration demo for `pd-vm` / RustScript.
 
+Play in your browser: **[RustScript Arcade](https://rustscript-lang.github.io/rustscript-bevy-gameplay/)**.
+
+RustScript core is pinned to `805991cfc6d81e7b9d6c042a222ecf70e3f2dab0` through Git dependencies. This is the latest host-descriptor integration branch revision, compatible with the upstream gameplay migration; core master currently has a different host API. A sibling core checkout is no longer required.
+
 ## Screenshots
 
 ![RustScript Bevy Shooter](docs/screenshots/shooter.png)
@@ -47,3 +51,22 @@ cargo run --example shooter -- --script-smoke
 cargo run --example gomoku -- --script-smoke
 cargo run --example xiangqi -- --script-smoke
 ```
+
+## Web / WebAssembly
+
+The same three Bevy examples compile to `wasm32-unknown-unknown`, with WebGL2 rendering and RustScript interpreter execution. Native builds retain Cranelift JIT. Live script editing, rule validation, AI, undo/redo, and restart are available in the browser. Board Save/Load uses local storage scoped to each game and browser origin. The thread-based debugger requires a native build.
+
+Prerequisites: Rust, Python 3.11+, and a `wasm-bindgen-cli` version matching `wasm-bindgen` in `Cargo.lock` (currently `0.2.126`).
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.126 --locked
+python tools/build_web.py
+python -m http.server 8000 --directory dist/web
+```
+
+Open `http://localhost:8000`. Use a desktop browser with WebGL2 enabled. Each game has loading progress, retry, fit-to-window, original-size, and fullscreen controls. Shooter uses WASD or arrow keys and fires automatically. Board games use pointer input. AI executes synchronously, so a complex move can briefly delay rendering in interpreter mode.
+
+The `Pages` workflow builds all three examples and deploys `dist/web` on pushes to `master`, or through manual dispatch. Configure the repository's Pages source as **GitHub Actions**. All resource URLs are relative so the site works under the repository's Pages subpath.
+
+Xiangqi embeds a small Noto Sans CJK subset for its Chinese labels. The font is licensed under SIL OFL 1.1; see `assets/fonts/LICENSE.txt`.

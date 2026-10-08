@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="在浏览器里体验 RustScript 驱动的飞行射击、五子棋与中国象棋，并实时修改游戏脚本。">
+  <title>RustScript Arcade</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23131719'/%3E%3Ctext x='12' y='45' fill='%23c3f36b' font-family='monospace' font-size='40'%3ER%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body class="lobby">
+  <header class="site-header">
+    <a class="wordmark" href="./">RustScript<span>/ ARCADE</span></a>
+    <a class="source-link" href="https://github.com/rustscript-lang/rustscript-bevy-gameplay">GitHub ↗</a>
+  </header>
+  <main>
+    <section class="hero">
+      <div class="hero-image" aria-hidden="true"></div>
+      <div class="hero-content">
+        <p class="eyebrow">PLAY · EDIT · REPEAT</p>
+        <h1>RustScript<br><span>Arcade.</span></h1>
+        <p class="hero-copy">三个游戏，一个脚本引擎。<br>直接开玩，也可以改写规则。</p>
+        <a class="primary-link" href="./shooter/">开始飞行射击 <span>↗</span></a>
+        <a class="quiet-link" href="#games">选择游戏 ↓</a>
+      </div>
+      <p class="hero-caption">01 / SHOOTER · BEVY × RUSTSCRIPT</p>
+    </section>
+    <section class="games-section" id="games" aria-labelledby="games-title">
+      <div class="section-heading"><h2 id="games-title">选择你的下一局</h2><span>03 GAMES / IN YOUR BROWSER</span></div>
+      <a class="game-row" href="./shooter/">
+        <span class="game-number">01</span>
+        <img src="./images/shooter.png" alt="飞船在星空中迎战敌方机群" loading="lazy">
+        <div class="game-description"><p class="eyebrow">ARCADE / 飞行射击</p><h3>Shooter</h3><p>闪避、自动开火、迎战机群。实时调整弹幕、敌人和奖励。</p><p class="controls-copy">WASD / 方向键移动</p></div>
+        <span class="play-link">开始游戏 ↗</span>
+      </a>
+      <a class="game-row" href="./gomoku/">
+        <span class="game-number">02</span>
+        <img src="./images/gomoku.png" alt="五子棋棋盘与实时脚本编辑器" loading="lazy">
+        <div class="game-description"><p class="eyebrow">STRATEGY / 五子棋</p><h3>Gomoku</h3><p>与脚本 AI 对弈，连接五枚棋子。调整 AI，研究每一步。</p><p class="controls-copy">点击交点落子 · 支持悔棋与保存</p></div>
+        <span class="play-link">开始游戏 ↗</span>
+      </a>
+      <a class="game-row" href="./xiangqi/">
+        <span class="game-number">03</span>
+        <img src="./images/xiangqi.png" alt="中国象棋棋盘与实时脚本编辑器" loading="lazy">
+        <div class="game-description"><p class="eyebrow">STRATEGY / 中国象棋</p><h3>Xiangqi</h3><p>跨越楚河汉界，与 AI 较量。规则与决策都在脚本中。</p><p class="controls-copy">点击棋子与目标位置 · 支持悔棋与保存</p></div>
+        <span class="play-link">开始游戏 ↗</span>
+      </a>
+    </section>
+    <section class="about-section"><p class="eyebrow">THE RULES ARE YOURS</p><h2>边玩，边改。</h2><p>右侧编辑器直接修改正在运行的 RustScript。游戏规则、AI 和参数随脚本更新，让每一次实验都可以立即看到结果。</p><a class="quiet-link" href="./gomoku/">打开五子棋实验台 ↗</a></section>
+  </main>
+  <footer><span>RustScript × Bevy</span><span>建议使用桌面浏览器 · WebGL2</span></footer>
+</body>
+</html>

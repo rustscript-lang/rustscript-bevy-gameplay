@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>__TITLE__ · RustScript Arcade</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23131719'/%3E%3Ctext x='12' y='45' fill='%23c3f36b' font-family='monospace' font-size='40'%3ER%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body class="game-page" data-game="__GAME__">
+  <header class="game-header">
+    <a class="wordmark" href="../">RustScript<span>/ ARCADE</span></a>
+    <nav aria-label="选择游戏"><a href="../shooter/" data-link="shooter">Shooter</a><a href="../gomoku/" data-link="gomoku">Gomoku</a><a href="../xiangqi/" data-link="xiangqi">Xiangqi</a></nav>
+    <button id="fullscreen" type="button">全屏 ↗</button>
+  </header>
+  <main class="game-main">
+    <div class="game-toolbar"><h1>__TITLE__</h1><p>__CONTROLS__</p><button id="scale-toggle" type="button" aria-pressed="false">原始大小</button></div>
+    <div id="stage" class="stage">
+      <div id="game-surface" class="game-surface"><canvas id="game-canvas" tabindex="0" aria-label="__TITLE__ 游戏画面"></canvas></div>
+      <div id="loading" class="loading" role="status" aria-live="polite">
+        <p class="eyebrow">RUSTSCRIPT / __GAME__</p><h2 id="loading-title">正在加载游戏</h2><p id="loading-detail">首次加载需要下载游戏资源。</p><progress id="progress" max="100" value="0" aria-label="下载进度"></progress><button id="retry" type="button" hidden>重新加载</button>
+      </div>
+    </div>
+    <p class="game-note">__NOTE__ 实时脚本编辑可用；线程调试器在桌面版中使用。</p>
+  </main>
+  <script type="module" src="../loader.js"></script>
+</body>
+</html>
