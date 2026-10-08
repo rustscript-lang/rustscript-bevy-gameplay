@@ -2,7 +2,7 @@
 
 Standalone Bevy integration demo for `pd-vm` / RustScript.
 
-Play in your browser: **[RustScript Arcade](https://rustscript-lang.github.io/rustscript-bevy-gameplay/)**.
+Play in your browser: **[RustScript Arcade](https://bevy.rustscript.org/)** — [Shooter](https://bevy.rustscript.org/shooter/), [Gomoku](https://bevy.rustscript.org/gomoku/), [Xiangqi](https://bevy.rustscript.org/xiangqi/).
 
 RustScript core is pinned to `805991cfc6d81e7b9d6c042a222ecf70e3f2dab0` through Git dependencies. This is the latest host-descriptor integration branch revision, compatible with the upstream gameplay migration; core master currently has a different host API. A sibling core checkout is no longer required.
 
@@ -67,6 +67,6 @@ python -m http.server 8000 --directory dist/web
 
 Open `http://localhost:8000`. Use a desktop browser with WebGL2 enabled. Each game has loading progress, retry, fit-to-window, original-size, and fullscreen controls. Shooter uses WASD or arrow keys and fires automatically. Board games use pointer input. AI executes synchronously, so a complex move can briefly delay rendering in interpreter mode.
 
-The `Pages` workflow builds all three examples and deploys `dist/web` on pushes to `master`, or through manual dispatch. Configure the repository's Pages source as **GitHub Actions**. All resource URLs are relative so the site works under the repository's Pages subpath.
+The `Pages` workflow builds all three examples and deploys `dist/web` on pushes to `master`, or through manual dispatch. Configure the repository's Pages source as **GitHub Actions**, with the custom domain `bevy.rustscript.org`. The build copies `web/CNAME` into the published site; its DNS CNAME points to `rustscript-lang.github.io`. All resource URLs are relative so the site also works under the repository's Pages subpath.
 
 Xiangqi embeds a small Noto Sans CJK subset for its Chinese labels. The font is licensed under SIL OFL 1.1; see `assets/fonts/LICENSE.txt`.
