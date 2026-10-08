@@ -36,7 +36,7 @@ def main():
     if not target.is_absolute():
         target = ROOT / target
     output.mkdir(parents=True, exist_ok=True)
-    for filename in ("index.html", "style.css", "loader.js", "CNAME"):
+    for filename in ("index.html", "style.css", "loader.js", "i18n.js", "CNAME"):
         shutil.copy2(ROOT / "web" / filename, output / filename)
     (output / "images").mkdir(exist_ok=True)
     template = (ROOT / "web/game.html").read_text(encoding="utf-8")

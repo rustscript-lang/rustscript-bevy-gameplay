@@ -6,22 +6,23 @@
   <title>__TITLE__ · RustScript Arcade</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23131719'/%3E%3Ctext x='12' y='45' fill='%23c3f36b' font-family='monospace' font-size='40'%3ER%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="../style.css">
+  <script src="../i18n.js"></script>
 </head>
 <body class="game-page" data-game="__GAME__">
   <header class="game-header">
     <a class="wordmark" href="../">RustScript<span>/ ARCADE</span></a>
-    <nav aria-label="选择游戏"><a href="../shooter/" data-link="shooter">Shooter</a><a href="../gomoku/" data-link="gomoku">Gomoku</a><a href="../xiangqi/" data-link="xiangqi">Xiangqi</a></nav>
-    <button id="fullscreen" type="button">全屏 ↗</button>
+    <nav data-i18n-aria-label="gameNavigation" aria-label="选择游戏"><a href="../shooter/" data-link="shooter">Shooter</a><a href="../gomoku/" data-link="gomoku">Gomoku</a><a href="../xiangqi/" data-link="xiangqi">Xiangqi</a></nav>
+    <div class="header-actions"><label class="language-control"><span class="sr-only" data-i18n="language">语言</span><select data-language-select><option value="auto" data-i18n="auto">自动</option><option value="zh">中文</option><option value="en">English</option></select></label><button id="fullscreen" type="button" data-i18n="fullscreen">全屏 ↗</button></div>
   </header>
   <main class="game-main">
-    <div class="game-toolbar"><h1>__TITLE__</h1><p>__CONTROLS__</p><button id="scale-toggle" type="button" aria-pressed="false">原始大小</button></div>
+    <div class="game-toolbar"><h1 data-i18n="__GAME__.title">__TITLE__</h1><p data-i18n="__GAME__.controls">__CONTROLS__</p><button id="scale-toggle" type="button" aria-pressed="false" data-i18n="originalSize">原始大小</button></div>
     <div id="stage" class="stage">
-      <div id="game-surface" class="game-surface"><canvas id="game-canvas" tabindex="0" aria-label="__TITLE__ 游戏画面"></canvas></div>
+      <div id="game-surface" class="game-surface"><canvas id="game-canvas" tabindex="0" data-i18n-aria-label="gameCanvas" aria-label="__TITLE__ 游戏画面"></canvas></div>
       <div id="loading" class="loading" role="status" aria-live="polite">
-        <p class="eyebrow">RUSTSCRIPT / __GAME__</p><h2 id="loading-title">正在加载游戏</h2><p id="loading-detail">首次加载需要下载游戏资源。</p><progress id="progress" max="100" value="0" aria-label="下载进度"></progress><button id="retry" type="button" hidden>重新加载</button>
+        <p class="eyebrow">RUSTSCRIPT / __GAME__</p><h2 id="loading-title" data-i18n="loading">正在加载游戏</h2><p id="loading-detail" data-i18n="initialLoading">首次加载需要下载游戏资源。</p><progress id="progress" max="100" value="0" aria-label="下载进度" data-i18n-aria-label="downloadProgress"></progress><button id="retry" data-i18n="retry" type="button" hidden>重新加载</button>
       </div>
     </div>
-    <p class="game-note">__NOTE__ 实时脚本编辑可用；线程调试器在桌面版中使用。</p>
+    <p class="game-note"><span data-i18n="__GAME__.note">__NOTE__</span> <span data-i18n="scriptNote">实时脚本编辑可用；线程调试器在桌面版中使用。</span></p>
   </main>
   <script type="module" src="../loader.js"></script>
 </body>

@@ -1,4 +1,5 @@
 const game = document.body.dataset.game;
+const { t, setText } = window.arcadeI18n;
 const canvas = document.querySelector('#game-canvas');
 const stage = document.querySelector('#stage');
 const surface = document.querySelector('#game-surface');
@@ -24,7 +25,7 @@ new ResizeObserver(() => requestAnimationFrame(fit)).observe(stage);
 scaleToggle.addEventListener('click', () => {
   originalSize = !originalSize;
   stage.style.overflow = originalSize ? 'auto' : 'hidden';
-  scaleToggle.textContent = originalSize ? '适应窗口' : '原始大小';
+  setText(scaleToggle, originalSize ? 'fitWindow' : 'originalSize');
   scaleToggle.setAttribute('aria-pressed', String(originalSize));
   fit();
 });
@@ -32,7 +33,7 @@ document.querySelector('#fullscreen').addEventListener('click', async () => {
   try {
     if (document.fullscreenElement) await document.exitFullscreen();
     else await document.querySelector('.game-main').requestFullscreen();
-  } catch { detail.textContent = '此浏览器无法进入全屏，可以使用原始大小模式。'; }
+  } catch { setText(detail, 'fullscreenFailed'); }
 });
 retry.addEventListener('click', () => location.reload());
 canvas.addEventListener('pointerdown', () => canvas.focus());
@@ -41,8 +42,9 @@ function fail(error) {
   console.error(error);
   document.body.dataset.status = 'error';
   loading.hidden = false;
-  document.querySelector('#loading-title').textContent = '游戏加载失败';
-  detail.textContent = `${error.message || error}。请重试，或使用支持 WebGL2 的桌面浏览器。`;
+  setText(document.querySelector('#loading-title'), 'loadingFailed');
+  setText(detail, 'loadingFailedDetail', {error: () => error?.translationKey
+    ? t(error.translationKey, error.translationValues) : String(error?.message || error)});
   progress.hidden = true;
   retry.hidden = false;
 }
@@ -58,7 +60,7 @@ window.addEventListener('unhandledrejection', event => fail(event.reason));
 
 async function download(url) {
   const response = await fetch(url);
-  if (!response.ok) throw new Error(`资源请求失败 (${response.status})`);
+  if (!response.ok) throw localizedError('resourceFailed', {status: response.status});
   const length = Number(response.headers.get('Content-Length'));
   if (!response.body) return new Uint8Array(await response.arrayBuffer());
   const reader = response.body.getReader();
@@ -72,7 +74,7 @@ async function download(url) {
     const percent = length ? Math.min(100, Math.round(received / length * 100)) : null;
     if (percent === null) progress.removeAttribute('value');
     else progress.value = percent;
-    detail.textContent = `下载中 · ${(received / 1048576).toFixed(1)} MB${percent === null ? '' : ` / ${percent}%`}`;
+    setText(detail, 'downloading', {mb: (received / 1048576).toFixed(1), percent: percent === null ? '' : ` / ${percent}%`});
   }
   const bytes = new Uint8Array(received);
   let offset = 0;
@@ -80,15 +82,22 @@ async function download(url) {
   return bytes;
 }
 
+function localizedError(key, values = {}) {
+  const error = new Error(t(key, values));
+  error.translationKey = key;
+  error.translationValues = values;
+  return error;
+}
+
 try {
   const probe = document.createElement('canvas');
   const gl = probe.getContext('webgl2');
-  if (!gl) throw new Error('WebGL2 不可用');
+  if (!gl) throw localizedError('webglUnavailable');
   gl.getExtension('WEBGL_lose_context')?.loseContext();
   const [{ default: init }, bytes] = await Promise.all([
     import(`./${game}/game.js`), download(new URL(`./${game}/game_bg.wasm`, import.meta.url)),
   ]);
-  detail.textContent = '正在启动游戏…';
+  setText(detail, 'starting');
   progress.removeAttribute('value');
   try { await init({ module_or_path: bytes }); }
   catch (error) {
