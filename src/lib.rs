@@ -13,6 +13,8 @@ use vm::{
 };
 pub(crate) use vm::{Value, Vm, VmResult};
 
+pub mod cooperative_debug;
+
 /// Frozen `rustscript-lang/rustscript` revision this crate is pinned to.
 pub const FROZEN_RUSTSCRIPT_REV: &str = "805991cfc6d81e7b9d6c042a222ecf70e3f2dab0";
 

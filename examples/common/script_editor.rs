@@ -1,14 +1,14 @@
-use std::{
-    collections::BTreeSet,
-    sync::{Arc, Mutex, mpsc::Receiver},
-    time::Duration,
-};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, Mutex, mpsc::Receiver};
+use std::{collections::BTreeSet, time::Duration};
 
 use bevy_egui::egui;
 use rustscript_bevy_gameplay::compile_bevy_script;
 #[cfg(test)]
 use vm::compile_source;
-use vm::{DebugCommandBridge, DebugCommandBridgeError, SourceError, SourceMap, SourcePathError};
+#[cfg(not(target_arch = "wasm32"))]
+use vm::{DebugCommandBridge, DebugCommandBridgeError};
+use vm::{SourceError, SourceMap, SourcePathError};
 use web_time::Instant;
 
 const CODE_FONT_SIZE: f32 = 13.0;
@@ -101,6 +101,13 @@ struct DebugHoverState {
     value: Option<String>,
 }
 
+#[cfg(target_arch = "wasm32")]
+#[path = "web_debug_session.rs"]
+mod web_debug_session;
+#[cfg(target_arch = "wasm32")]
+pub use web_debug_session::DebugSession;
+
+#[cfg(not(target_arch = "wasm32"))]
 pub struct DebugSession {
     pub bridge: DebugCommandBridge,
     receiver: Arc<Mutex<Receiver<String>>>,
@@ -111,6 +118,7 @@ pub struct DebugSession {
     pending_breakpoints: Vec<u32>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl DebugSession {
     pub fn new(
         bridge: DebugCommandBridge,
@@ -271,6 +279,7 @@ impl DebugSession {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for DebugSession {
     fn drop(&mut self) {
         self.bridge.close();
@@ -429,7 +438,7 @@ impl LiveScriptEditor {
         ui.heading("Live RustScript");
         ui.add_space(6.0);
         if cfg!(target_arch = "wasm32") {
-            ui.small("Web mode: live editing enabled; thread debugger requires desktop.");
+            ui.small("Web debugger: resumable execution on an isolated board snapshot.");
         }
 
         let active = self.active.min(self.tabs.len().saturating_sub(1));
@@ -437,7 +446,9 @@ impl LiveScriptEditor {
             if ui.button("Reset").clicked() {
                 actions.push(self.reset_active_tab(active));
             }
-            let debug_label = if self.debug_starting {
+            let debug_label = if self.debug_starting && cfg!(target_arch = "wasm32") {
+                "Running"
+            } else if self.debug_starting {
                 "Starting..."
             } else if self.debug_pending && self.debug_tab == Some(active) {
                 "Armed"
@@ -446,10 +457,7 @@ impl LiveScriptEditor {
             };
             if ui
                 .add_enabled(
-                    !cfg!(target_arch = "wasm32")
-                        && !self.debug_starting
-                        && !self.debug_attached
-                        && !self.debug_pending,
+                    !self.debug_starting && !self.debug_attached && !self.debug_pending,
                     egui::Button::new(debug_label),
                 )
                 .clicked()
@@ -477,6 +485,22 @@ impl LiveScriptEditor {
             if ui
                 .add_enabled(
                     self.debug_attached && self.debug_tab == Some(active),
+                    egui::Button::new("Out"),
+                )
+                .clicked()
+            {
+                actions.push(EditorAction::RunDebugCommand("out".to_string()));
+            }
+            if cfg!(target_arch = "wasm32")
+                && ui
+                    .add_enabled(self.debug_starting, egui::Button::new("Pause"))
+                    .clicked()
+            {
+                actions.push(EditorAction::RunDebugCommand("pause".to_string()));
+            }
+            if ui
+                .add_enabled(
+                    self.debug_attached && self.debug_tab == Some(active),
                     egui::Button::new("Continue"),
                 )
                 .clicked()
@@ -491,6 +515,15 @@ impl LiveScriptEditor {
                 .clicked()
             {
                 actions.push(EditorAction::RefreshLocals);
+            }
+            if ui
+                .add_enabled(
+                    self.debug_attached || self.debug_starting || self.debug_pending,
+                    egui::Button::new("Stop"),
+                )
+                .clicked()
+            {
+                actions.push(EditorAction::StopDebug);
             }
         });
 
@@ -511,7 +544,11 @@ impl LiveScriptEditor {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(&tab.status).color(status_color(tab)));
             if self.debug_starting {
-                ui.label("debugger starting");
+                ui.label(if cfg!(target_arch = "wasm32") {
+                    "debugger running"
+                } else {
+                    "debugger starting"
+                });
             } else if self.debug_pending && self.debug_tab == Some(active) {
                 ui.label("debugger armed");
             } else if let Some(line) = self.debug_line {
@@ -557,51 +594,10 @@ impl LiveScriptEditor {
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.set_height(content_height);
-                    ui.vertical(|ui| {
-                        ui.set_width(gutter_width);
-                        ui.add_space(4.0);
-                        for line_index in 1..=line_count {
-                            let line = line_index as u32;
-                            let has_breakpoint = tab.breakpoints.contains(&line);
-                            let text = if has_breakpoint { "●" } else { " " };
-                            let button = egui::Button::new(
-                                egui::RichText::new(text).monospace().size(13.0).color(
-                                    if has_breakpoint {
-                                        egui::Color32::from_rgb(245, 70, 82)
-                                    } else {
-                                        egui::Color32::from_rgb(92, 102, 116)
-                                    },
-                                ),
-                            )
-                            .frame(false)
-                            .min_size(egui::vec2(18.0, row_height));
-                            let line_response = ui
-                                .horizontal(|ui| {
-                                    let clicked = ui.add(button).clicked();
-                                    ui.label(
-                                        egui::RichText::new(format!("{line_index:>2}"))
-                                            .monospace()
-                                            .size(11.0)
-                                            .color(egui::Color32::from_rgb(108, 118, 132)),
-                                    );
-                                    clicked
-                                })
-                                .inner;
-                            if line_response {
-                                let enabled = !has_breakpoint;
-                                if enabled {
-                                    tab.breakpoints.insert(line);
-                                } else {
-                                    tab.breakpoints.remove(&line);
-                                }
-                                actions.push(EditorAction::ToggleBreakpoint {
-                                    tab: active,
-                                    line,
-                                    enabled,
-                                });
-                            }
-                        }
-                    });
+                    let (gutter_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(gutter_width, content_height),
+                        egui::Sense::hover(),
+                    );
                     let output = ui
                         .scope(|ui| {
                             ui.set_min_size(egui::vec2(text_width, content_height));
@@ -614,6 +610,57 @@ impl LiveScriptEditor {
                                 .show(ui)
                         })
                         .inner;
+                    // Match source line numbers to the editor's actual layout,
+                    // including blank lines and wrapped expressions.
+                    let mut char_index = 0;
+                    for (index, source_line) in tab.buffer.split('\n').enumerate() {
+                        let line = index as u32 + 1;
+                        let cursor_rect = output
+                            .galley
+                            .pos_from_cursor(egui::text::CCursor::new(char_index));
+                        let y = output.galley_pos.y + cursor_rect.center().y;
+                        let marker_rect = egui::Rect::from_center_size(
+                            egui::pos2(gutter_rect.left() + 9.0, y),
+                            egui::vec2(18.0, cursor_rect.height().max(12.0)),
+                        );
+                        let marker = ui.interact(
+                            marker_rect,
+                            ui.id().with(("line_breakpoint", active, line)),
+                            egui::Sense::click(),
+                        );
+                        if marker.clicked() {
+                            let enabled = !tab.breakpoints.contains(&line);
+                            if enabled {
+                                tab.breakpoints.insert(line);
+                            } else {
+                                tab.breakpoints.remove(&line);
+                            }
+                            actions.push(EditorAction::ToggleBreakpoint {
+                                tab: active,
+                                line,
+                                enabled,
+                            });
+                        }
+                        if tab.breakpoints.contains(&line) || marker.hovered() {
+                            ui.painter().circle_filled(
+                                marker_rect.center(),
+                                3.5,
+                                if tab.breakpoints.contains(&line) {
+                                    egui::Color32::from_rgb(245, 70, 82)
+                                } else {
+                                    egui::Color32::from_rgb(92, 102, 116)
+                                },
+                            );
+                        }
+                        ui.painter().text(
+                            egui::pos2(gutter_rect.right() - 2.0, y),
+                            egui::Align2::RIGHT_CENTER,
+                            line.to_string(),
+                            egui::FontId::monospace(11.0),
+                            egui::Color32::from_rgb(108, 118, 132),
+                        );
+                        char_index += source_line.chars().count() + 1;
+                    }
                     response_changed = output.response.changed();
                     if self.debug_attached
                         && self.debug_tab == Some(active)
@@ -694,6 +741,8 @@ fn render_debug_console(
         ui.label(egui::RichText::new("DEBUG CONSOLE").strong().size(11.0));
         let status = if editor.debug_attached {
             "paused"
+        } else if editor.debug_starting && cfg!(target_arch = "wasm32") {
+            "running"
         } else if editor.debug_starting || editor.debug_pending {
             "waiting"
         } else {

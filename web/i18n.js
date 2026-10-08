@@ -13,7 +13,7 @@
       'shooter.title': 'Shooter', 'gomoku.title': 'Gomoku', 'xiangqi.title': 'Xiangqi / Chinese chess',
       'shooter.controls': 'WASD / Arrow keys to move · Automatic fire', 'gomoku.controls': 'Click the board to play · Challenge the AI', 'xiangqi.controls': 'Click a piece, then its destination',
       'shooter.note': 'Click the game canvas, then use the keyboard to move.', 'gomoku.note': 'Save / Load stores and restores the board and scripts in this browser.', 'xiangqi.note': 'Save / Load stores and restores the board and scripts in this browser.',
-      scriptNote: 'Live script editing is available; use the desktop version for the thread-based debugger.'
+      scriptNote: 'Live editing and debugging are available. Use Debug, Step, Next, Out, Continue, and Locals in the script panel.'
     },
     zh: {
       description: '在浏览器里体验 RustScript 驱动的飞行射击、五子棋与中国象棋，并实时修改游戏脚本。',
@@ -28,7 +28,7 @@
       'shooter.title': 'Shooter / 飞行射击', 'gomoku.title': 'Gomoku / 五子棋', 'xiangqi.title': 'Xiangqi / 中国象棋',
       'shooter.controls': 'WASD / 方向键移动 · 自动开火', 'gomoku.controls': '点击棋盘落子 · 与 AI 对弈', 'xiangqi.controls': '点击棋子，再点击目标位置',
       'shooter.note': '点击游戏画面后使用键盘移动。', 'gomoku.note': 'Save / Load 在当前浏览器保存、恢复棋局与脚本。', 'xiangqi.note': 'Save / Load 在当前浏览器保存、恢复棋局与脚本。',
-      scriptNote: '实时脚本编辑可用；线程调试器在桌面版中使用。'
+      scriptNote: '支持实时脚本编辑与调试。在脚本面板中使用 Debug、Step、Next、Out、Continue 和 Locals。'
     }
   };
   const storageKey = 'rustscript-arcade-language';

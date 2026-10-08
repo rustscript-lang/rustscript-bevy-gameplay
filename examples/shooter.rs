@@ -10,6 +10,8 @@ use bevy_egui::{
     EguiContexts, EguiGlobalSettings, EguiMultipassSchedule, EguiPlugin, EguiPrimaryContextPass,
     PrimaryEguiContext, egui,
 };
+#[cfg(target_arch = "wasm32")]
+use rustscript_bevy_gameplay::cooperative_debug::{CooperativeDebugger, DebugInvocation};
 use rustscript_bevy_gameplay::{
     AttackCooldownMs, AttackPower, AttackStyle, Enemy, Health, Player, PlayerProjectileLoadout,
     Position, RewardItem, ScriptManagedEnemy, ShooterSpawnRules, Velocity, apply_shooter_script,
@@ -64,59 +66,62 @@ fn main() {
         return;
     }
 
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "RustScript Bevy Shooter".to_string(),
-                resolution: default_window_size().into(),
-                canvas: Some("#game-canvas".into()),
-                fit_canvas_to_parent: true,
-                prevent_default_event_handling: true,
-                ..default()
-            }),
+    let mut app = App::new();
+    #[cfg(target_arch = "wasm32")]
+    app.init_resource::<ShooterDebug>()
+        .add_systems(Update, poll_shooter_debug.before(apply_pending_script));
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: "RustScript Bevy Shooter".to_string(),
+            resolution: default_window_size().into(),
+            canvas: Some("#game-canvas".into()),
+            fit_canvas_to_parent: true,
+            prevent_default_event_handling: true,
             ..default()
-        }))
-        .add_plugins(EguiPlugin::default())
-        .insert_resource(ClearColor(Color::srgb(0.055, 0.085, 0.14)))
-        .insert_resource(Score(0))
-        .insert_resource(SpawnRuleProgress::default())
-        .insert_resource(GameFlow::Running)
-        .insert_resource(ScriptEditor {
-            buffer: SCRIPT.to_string(),
-            status: "Press Save or wait one frame for initial RustScript apply".to_string(),
-            diagnostics: Vec::new(),
-            pending_save: true,
-            pending_restart: false,
-            jit_enabled: !cfg!(target_arch = "wasm32"),
-            jit_trace_count: 0,
-        })
-        .add_systems(Startup, setup)
-        .add_systems(EguiPrimaryContextPass, script_panel)
-        .add_systems(
-            Update,
-            (
-                apply_pending_script,
-                attach_render_components,
-                move_player,
-                enemy_motion,
-                player_fire,
-                enemy_fire,
-                guide_homing_projectiles,
-                apply_velocity,
-                tick_lifetimes,
-                update_shockwaves,
-                sync_positions,
-                animate_sprites,
-                animate_visual_motion,
-                collisions,
-                run_scripted_spawn_rules,
-                update_game_flow_after_health,
-                collect_rewards,
-                despawn_out_of_bounds,
-            )
-                .chain(),
+        }),
+        ..default()
+    }))
+    .add_plugins(EguiPlugin::default())
+    .insert_resource(ClearColor(Color::srgb(0.055, 0.085, 0.14)))
+    .insert_resource(Score(0))
+    .insert_resource(SpawnRuleProgress::default())
+    .insert_resource(GameFlow::Running)
+    .insert_resource(ScriptEditor {
+        buffer: SCRIPT.to_string(),
+        status: "Press Save or wait one frame for initial RustScript apply".to_string(),
+        diagnostics: Vec::new(),
+        pending_save: true,
+        pending_restart: false,
+        jit_enabled: !cfg!(target_arch = "wasm32"),
+        jit_trace_count: 0,
+    })
+    .add_systems(Startup, setup)
+    .add_systems(EguiPrimaryContextPass, script_panel)
+    .add_systems(
+        Update,
+        (
+            apply_pending_script,
+            attach_render_components,
+            move_player,
+            enemy_motion,
+            player_fire,
+            enemy_fire,
+            guide_homing_projectiles,
+            apply_velocity,
+            tick_lifetimes,
+            update_shockwaves,
+            sync_positions,
+            animate_sprites,
+            animate_visual_motion,
+            collisions,
+            run_scripted_spawn_rules,
+            update_game_flow_after_health,
+            collect_rewards,
+            despawn_out_of_bounds,
         )
-        .run();
+            .chain(),
+    )
+    .run();
 }
 
 fn run_script_smoke() {
@@ -151,6 +156,61 @@ struct ScriptEditor {
     pending_restart: bool,
     jit_enabled: bool,
     jit_trace_count: usize,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Resource, Default)]
+struct ShooterDebug {
+    session: Option<CooperativeDebugger>,
+    source: Option<String>,
+    commands: Vec<String>,
+    stop: bool,
+    running: bool,
+    finished: bool,
+    line: Option<u32>,
+    output: String,
+    breakpoint: u32,
+    console: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn poll_shooter_debug(world: &mut World) {
+    let Some(mut debug) = world.remove_resource::<ShooterDebug>() else {
+        return;
+    };
+    if debug.stop {
+        debug.session = None;
+        debug.stop = false;
+        debug.commands.clear();
+        debug.source = None;
+        debug.running = false;
+        debug.finished = false;
+        debug.line = None;
+        debug.output = "debug session stopped".to_string();
+    }
+    if let Some(source) = debug.source.take() {
+        match CooperativeDebugger::new(world, &source, DebugInvocation::Shooter) {
+            Ok(session) => {
+                debug.session = Some(session);
+                debug.output.clear();
+            }
+            Err(error) => {
+                debug.output = format!("debug error: {error}");
+            }
+        }
+    }
+    if let Some(session) = &debug.session {
+        for command in std::mem::take(&mut debug.commands) {
+            session.command(&command);
+        }
+        session.advance();
+        let snapshot = session.snapshot();
+        debug.running = snapshot.running;
+        debug.finished = snapshot.finished;
+        debug.line = snapshot.line;
+        debug.output = snapshot.output;
+    }
+    world.insert_resource(debug);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2515,6 +2575,7 @@ fn script_panel(
         With<Player>,
     >,
     enemies: Query<&Enemy>,
+    #[cfg(target_arch = "wasm32")] mut debug: ResMut<ShooterDebug>,
 ) -> bevy::prelude::Result {
     let ctx = contexts.ctx_mut()?;
     if *flow == GameFlow::GameOver {
@@ -2611,6 +2672,78 @@ fn script_panel(
             ));
             ui.label(jit_status_label(editor.jit_enabled, editor.jit_trace_count));
             ui.label(&editor.status);
+            #[cfg(target_arch = "wasm32")]
+            {
+                ui.small("Debugger evaluates an isolated sandbox; live ships keep running.");
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(debug.session.is_none(), egui::Button::new("Debug"))
+                        .clicked()
+                    {
+                        debug.source = Some(editor.buffer.clone());
+                    }
+                    let paused = debug.session.is_some() && !debug.running && !debug.finished;
+                    for (label, command) in [
+                        ("Step", "step"),
+                        ("Next", "next"),
+                        ("Out", "out"),
+                        ("Continue", "continue"),
+                        ("Locals", "locals"),
+                    ] {
+                        if ui.add_enabled(paused, egui::Button::new(label)).clicked() {
+                            debug.commands.push(command.to_string());
+                        }
+                    }
+                    if ui
+                        .add_enabled(debug.running, egui::Button::new("Pause"))
+                        .clicked()
+                    {
+                        debug.commands.push("pause".to_string());
+                    }
+                    if ui
+                        .add_enabled(debug.session.is_some(), egui::Button::new("Stop"))
+                        .clicked()
+                    {
+                        debug.stop = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Break line");
+                    ui.add(egui::DragValue::new(&mut debug.breakpoint).range(1..=100_000));
+                    for (label, verb) in [("Set", "break"), ("Clear", "clear")] {
+                        if ui
+                            .add_enabled(debug.session.is_some(), egui::Button::new(label))
+                            .clicked()
+                        {
+                            let line = debug.breakpoint;
+                            debug.commands.push(format!("{verb} line {line}"));
+                        }
+                    }
+                    if let Some(line) = debug.line {
+                        ui.label(format!("debug line {line}"));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut debug.console)
+                            .hint_text("print NAME / stack / where")
+                            .desired_width(220.0),
+                    );
+                    if ui
+                        .add_enabled(debug.session.is_some(), egui::Button::new("Send"))
+                        .clicked()
+                    {
+                        let command = std::mem::take(&mut debug.console);
+                        debug.commands.push(command);
+                    }
+                });
+                egui::ScrollArea::vertical()
+                    .id_salt("shooter_debug_output")
+                    .max_height(90.0)
+                    .show(ui, |ui| {
+                        ui.monospace(&debug.output);
+                    });
+            }
             ui.separator();
             let diagnostics = editor.diagnostics.clone();
             let mut layouter =
@@ -2619,15 +2752,22 @@ fn script_panel(
                     job.wrap.max_width = wrap_width;
                     ui.fonts_mut(|fonts| fonts.layout_job(job))
                 };
-            ui.add(
-                egui::TextEdit::multiline(&mut editor.buffer)
-                    .code_editor()
-                    .font(egui::FontId::monospace(13.0))
-                    .desired_rows(26)
-                    .desired_width(f32::INFINITY)
-                    .layouter(&mut layouter),
-            );
-            render_script_diagnostics(ui, &editor.diagnostics);
+            let code_height = (ui.available_height() - 34.0).max(180.0);
+            egui::ScrollArea::vertical()
+                .id_salt("shooter_script_source")
+                .max_height(code_height)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut editor.buffer)
+                            .code_editor()
+                            .font(egui::FontId::monospace(13.0))
+                            .desired_rows(26)
+                            .desired_width(f32::INFINITY)
+                            .layouter(&mut layouter),
+                    );
+                    render_script_diagnostics(ui, &editor.diagnostics);
+                });
             if ui.button("Save and apply now").clicked() {
                 editor.pending_save = true;
             }

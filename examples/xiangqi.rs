@@ -2,9 +2,11 @@
 
 use std::{
     sync::{Arc, Mutex, mpsc},
-    thread,
     time::Duration,
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::thread;
 
 use web_time::Instant;
 
@@ -16,12 +18,19 @@ use bevy_egui::{
     EguiContexts, EguiGlobalSettings, EguiMultipassSchedule, EguiPlugin, EguiPrimaryContextPass,
     PrimaryEguiContext, egui,
 };
+#[cfg(target_arch = "wasm32")]
+use rustscript_bevy_gameplay::cooperative_debug::{
+    CooperativeDebugger, DebugInvocation, DebugResult,
+};
 use rustscript_bevy_gameplay::{
     XIANGQI_BOARD_HEIGHT, XIANGQI_BOARD_WIDTH, XiangqiAiMove, XiangqiBoard, XiangqiMoveSummary,
     apply_xiangqi_move_script, choose_xiangqi_ai_move, choose_xiangqi_ai_move_with_bias,
-    debug_xiangqi_ai_script_with_bias, debug_xiangqi_move_script, reset_xiangqi_board,
+    reset_xiangqi_board,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use rustscript_bevy_gameplay::{debug_xiangqi_ai_script_with_bias, debug_xiangqi_move_script};
 use script_editor::{DebugSession, EditorAction, LiveScriptEditor, ScriptTab};
+#[cfg(not(target_arch = "wasm32"))]
 use vm::{DebugCommandBridge, Debugger};
 
 #[path = "common/board_save.rs"]
@@ -278,6 +287,24 @@ fn xiangqi_ui(world: &mut World) {
     scripts.editor.update_auto_apply(Instant::now());
     if let Some(session) = scripts.debug_session.as_mut() {
         session.poll(&mut scripts.editor);
+        #[cfg(target_arch = "wasm32")]
+        if scripts.pending_ai_debug.is_some() {
+            state.message = if scripts.editor.debug_starting {
+                "AI debugger running"
+            } else {
+                "AI debugger paused"
+            }
+            .to_string();
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    if scripts.pending_ai_debug.is_none()
+        && scripts
+            .debug_session
+            .as_ref()
+            .is_some_and(DebugSession::is_finished)
+    {
+        scripts.debug_session = None;
     }
     poll_xiangqi_ai_debug_result(world, &mut scripts, &mut state);
     let mut clicked = None;
@@ -1131,6 +1158,7 @@ fn handle_xiangqi_editor_actions(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn start_xiangqi_debug_session(world: &mut World, scripts: &mut XiangqiScripts, tab: usize) {
     if tab == AI_TAB {
         scripts.debug_session = None;
@@ -1185,6 +1213,7 @@ fn start_xiangqi_debug_session(world: &mut World, scripts: &mut XiangqiScripts, 
     ));
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn start_xiangqi_ai_debug_for_turn(
     world: &mut World,
     scripts: &mut XiangqiScripts,
@@ -1236,6 +1265,89 @@ fn start_xiangqi_ai_debug_for_turn(
     scripts.pending_ai_debug = Some(PendingXiangqiAiDebug {
         player,
         receiver: Arc::new(Mutex::new(result_receiver)),
+    });
+    true
+}
+
+#[cfg(target_arch = "wasm32")]
+fn start_xiangqi_debug_session(world: &mut World, scripts: &mut XiangqiScripts, tab: usize) {
+    if tab == AI_TAB {
+        scripts.debug_session = None;
+        scripts.pending_ai_debug = None;
+        scripts.editor.begin_pending_debug_session(tab);
+        return;
+    }
+    match CooperativeDebugger::new(
+        world,
+        scripts.editor.active_source(tab),
+        DebugInvocation::XiangqiMove {
+            from_x: 4,
+            from_y: 6,
+            to_x: 4,
+            to_y: 5,
+            player: RED,
+        },
+    ) {
+        Ok(debugger) => {
+            scripts.editor.begin_debug_session(tab);
+            scripts.debug_session = Some(DebugSession::new_web(
+                debugger,
+                tab,
+                scripts.editor.source_line_offset(tab),
+                scripts.editor.user_breakpoints(tab),
+                |_| {},
+            ));
+        }
+        Err(error) => {
+            scripts.editor.clear_debug_state();
+            scripts.editor.debug_output = format!("debug error: {error}");
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn start_xiangqi_ai_debug_for_turn(
+    world: &mut World,
+    scripts: &mut XiangqiScripts,
+    source: String,
+    player: i64,
+    ai_bias: i64,
+) -> bool {
+    if !(scripts.editor.debug_pending && scripts.editor.debug_tab == Some(AI_TAB)) {
+        return false;
+    }
+    let (sender, receiver) = mpsc::channel();
+    match CooperativeDebugger::new(
+        world,
+        &source,
+        DebugInvocation::XiangqiAi {
+            player,
+            bias: ai_bias,
+        },
+    ) {
+        Ok(debugger) => {
+            scripts.editor.begin_debug_session(AI_TAB);
+            scripts.debug_session = Some(DebugSession::new_web(
+                debugger,
+                AI_TAB,
+                scripts.editor.source_line_offset(AI_TAB),
+                scripts.editor.user_breakpoints(AI_TAB),
+                move |result| {
+                    let result = result.and_then(|result| match result {
+                        DebugResult::XiangqiAi(mv) => Ok(mv),
+                        _ => Err("unexpected AI debug result".to_string()),
+                    });
+                    let _ = sender.send(result);
+                },
+            ));
+        }
+        Err(error) => {
+            let _ = sender.send(Err(error));
+        }
+    }
+    scripts.pending_ai_debug = Some(PendingXiangqiAiDebug {
+        player,
+        receiver: Arc::new(Mutex::new(receiver)),
     });
     true
 }
