@@ -459,11 +459,7 @@ pub(crate) mod host {
                         *kills_seen as f64
                     }
                     (ShooterSpawnTrigger::AfterKills { fired, .. }, "fired") => {
-                        if *fired {
-                            1.0
-                        } else {
-                            0.0
-                        }
+                        f64::from(u8::from(*fired))
                     }
                     _ => 0.0,
                 })

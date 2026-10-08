@@ -706,4 +706,99 @@ mod tests {
         paused(&debug);
         assert!(debug.command("print count").contains("Int(10)"));
     }
+    #[test]
+    fn all_shooter_tabs_debug_current_gameplay_snapshots_without_changing_live_entities() {
+        let tabs = [
+            include_str!("../scripts/shooter_game.rss"),
+            include_str!("../scripts/shooter_flow.rss"),
+            include_str!("../scripts/shooter_planes.rss"),
+            include_str!("../scripts/shooter_projectiles.rss"),
+            include_str!("../scripts/shooter_spawns.rss"),
+        ];
+        for (index, source) in tabs.into_iter().enumerate() {
+            let mut world = World::new();
+            apply_shooter_script(&mut world, tabs[0]).unwrap();
+            world.insert_resource(ShooterFrame(HashMap::from([
+                ("delta_ms".into(), if index == 4 { 8000.0 } else { 300.0 }),
+                ("input_x".into(), 1.0),
+                ("input_y".into(), 0.0),
+            ])));
+            let player = world
+                .query_filtered::<Entity, With<Player>>()
+                .single(&world)
+                .unwrap();
+            world
+                .entity_mut(player)
+                .insert(ShooterData(HashMap::from([("fire".into(), 1.0)])));
+            let initial_position = *world.get::<Position>(player).unwrap();
+            let initial_health = world.get::<Health>(player).unwrap().0;
+            let enemies = world.query::<&Enemy>().iter(&world).count();
+            let debug = CooperativeDebugger::from_shooter_snapshot(
+                snapshot_shooter_world(&mut world),
+                source,
+            )
+            .unwrap();
+            paused(&debug);
+            debug.command("step");
+            paused(&debug);
+            assert!(!debug.snapshot().finished);
+            debug.command("locals");
+            assert!(
+                matches!(completed(&debug), Ok(DebugResult::Shooter)),
+                "tab {index}"
+            );
+            SESSIONS.with(|sessions| {
+                let mut sessions = sessions.borrow_mut();
+                let copy = &mut sessions.get_mut(&debug.id).unwrap().world;
+                if index == 1 {
+                    let position = copy
+                        .query_filtered::<&Position, With<Player>>()
+                        .single(copy)
+                        .unwrap();
+                    assert!((position.x - initial_position.x - 90.0).abs() < 0.01);
+                }
+                if index == 3 {
+                    assert!(copy.query::<&ShooterProjectile>().iter(copy).count() > 0);
+                }
+                if index == 4 {
+                    assert!(copy.query::<&Enemy>().iter(copy).count() > enemies);
+                }
+            });
+            assert_eq!(world.get::<Position>(player).unwrap().x, initial_position.x);
+            assert_eq!(world.get::<Position>(player).unwrap().y, initial_position.y);
+            assert_eq!(world.get::<Health>(player).unwrap().0, initial_health);
+            assert_eq!(world.query::<&Enemy>().iter(&world).count(), enemies);
+            assert_eq!(world.query::<&ShooterProjectile>().iter(&world).count(), 0);
+        }
+    }
+
+    #[test]
+    fn shooter_entity_host_state_survives_breakpoint_and_next() {
+        let mut world = World::new();
+        apply_shooter_script(
+            &mut world,
+            "use bevy; bevy::Shooter::set_player_health(95); true;",
+        )
+        .unwrap();
+        let player = world
+            .query_filtered::<Entity, With<Player>>()
+            .single(&world)
+            .unwrap();
+        let source = "use bevy;\nlet ids = bevy::Shooter::entities();\nlet player = (&ids)[0];\nlet before = bevy::Shooter::get(player, \"health\");\nbevy::Shooter::set(player, \"health\", before - 1.0);\nlet after = bevy::Shooter::get(player, \"health\");\nafter;";
+        let debug =
+            CooperativeDebugger::from_shooter_snapshot(snapshot_shooter_world(&mut world), source)
+                .unwrap();
+        paused(&debug);
+        debug.command("break line 6");
+        debug.command("continue");
+        paused(&debug);
+        assert_eq!(debug.snapshot().line, Some(6));
+        debug.command("clear line 6");
+        debug.command("next");
+        paused(&debug);
+        assert!(debug.command("print after").contains("Float(94"));
+        assert_eq!(world.get::<Health>(player).unwrap().0, 95);
+        completed(&debug).unwrap();
+        assert_eq!(world.get::<Health>(player).unwrap().0, 95);
+    }
 }

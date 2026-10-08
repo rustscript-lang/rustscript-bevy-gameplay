@@ -1258,10 +1258,19 @@ fn script_panel(world: &mut World) {
     if let Some(session) = editor.debug_session.as_mut() {
         session.poll(&mut editor.editor);
     }
-    if !editor.editor.debug_attached && !editor.editor.debug_starting {
-        if let Some(previous) = editor.debug_previous_flow.take() {
-            world.insert_resource(previous);
-        }
+    #[cfg(target_arch = "wasm32")]
+    if editor
+        .debug_session
+        .as_ref()
+        .is_some_and(DebugSession::is_finished)
+    {
+        editor.debug_session = None;
+    }
+    if !editor.editor.debug_attached
+        && !editor.editor.debug_starting
+        && let Some(previous) = editor.debug_previous_flow.take()
+    {
+        world.insert_resource(previous);
     }
     let mut flow = *world.resource::<GameFlow>();
     let score = world.resource::<Score>().0;
