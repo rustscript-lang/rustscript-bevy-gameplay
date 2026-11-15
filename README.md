@@ -4,7 +4,7 @@ Standalone Bevy integration demo for `pd-vm` / RustScript.
 
 Play in your browser: **[RustScript Arcade](https://bevy.rustscript.org/)** — [Shooter](https://bevy.rustscript.org/shooter/), [Gomoku](https://bevy.rustscript.org/gomoku/), [Xiangqi](https://bevy.rustscript.org/xiangqi/).
 
-RustScript core is pinned to `fc8b0c8179640a8ffe460a64b3690e35c2f7eb73` through Git dependencies. That revision carries the `Unit` / `Option` / `Result` host schema used by the gameplay descriptors; a sibling core checkout is not required.
+RustScript core is pinned to `2f433edab3f1907e8cb060e901357d7e2af016ce` through Git dependencies. That revision carries the `Unit` / `Option` / `Result` host schema used by the gameplay descriptors; a sibling core checkout is not required.
 
 ## Screenshots
 
