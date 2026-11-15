@@ -21,7 +21,7 @@ pub use shooter_runtime::{
 };
 
 /// Frozen `rustscript-lang/rustscript` revision this crate is pinned to.
-pub const FROZEN_RUSTSCRIPT_REV: &str = "805991cfc6d81e7b9d6c042a222ecf70e3f2dab0";
+pub const FROZEN_RUSTSCRIPT_REV: &str = "2f433edab3f1907e8cb060e901357d7e2af016ce";
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Health(pub i64);

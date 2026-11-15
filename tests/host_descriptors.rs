@@ -20,9 +20,9 @@ use vm::{
 /// lowercase hex digits). Bump together with [`BEVY_HOST_CATALOG_FINGERPRINT_U64`]
 /// when the guest catalog surface or frozen pd-vm fingerprint encoding changes.
 /// See [`bevy_host_catalog`] for the full policy.
-const BEVY_HOST_CATALOG_FINGERPRINT_HEX: &str = "c4b1c4887b21bd02";
+const BEVY_HOST_CATALOG_FINGERPRINT_HEX: &str = "2a31bac6f8b1c529";
 /// Exact `u64` form of the same digest. Keep in lockstep with the hex snapshot.
-const BEVY_HOST_CATALOG_FINGERPRINT_U64: u64 = 0xc4b1c4887b21bd02;
+const BEVY_HOST_CATALOG_FINGERPRINT_U64: u64 = 0x2a31bac6f8b1c529;
 
 const LISTED_HOST_SOURCE: &str = "use bevy;\nbevy::World::contains_entity();\n";
 const UNLISTED_HOST_SOURCE: &str = "use bevy;\nbevy::World::not_a_host();\n";
