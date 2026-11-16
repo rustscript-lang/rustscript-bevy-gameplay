@@ -26,6 +26,7 @@ jobs:
   build-examples:
     name: Build Bevy examples (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -36,7 +37,7 @@ jobs:
           - os: windows-latest
             platform: windows-x86_64
             exe_suffix: ".exe"
-          - os: macos-14
+          - os: macos-15
             platform: macos-arm64
             exe_suffix: ""
 

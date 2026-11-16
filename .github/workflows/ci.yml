@@ -1,11 +1,19 @@
 name: CI
 
 on:
+  # Branch pushes only. Tag pushes are built and published by the Release
+  # workflow, so CI must not spend a runner on them (it used to hang there for
+  # the full 6h default job timeout, see run 37834678220 on tag 1.0.12).
   push:
+    branches: ["**"]
   pull_request:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,12 +23,16 @@ jobs:
   rust:
     name: Rust lint and tests
     runs-on: ubuntu-latest
+    # Hard ceiling: a deadlocking test must fail the job quickly instead of
+    # burning the 6h GitHub default and blocking the queue.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - name: Install Linux native dependencies
+        timeout-minutes: 10
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -36,8 +48,16 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy
+        timeout-minutes: 20
         run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Tests (skip perf)
-        run: cargo test --all-targets --locked
+      # Split from the example targets so a hang inside an example's test
+      # harness cannot swallow the lib/integration results.
+      - name: Tests (lib and integration targets, perf tests ignored)
+        timeout-minutes: 25
+        run: cargo test --locked --lib --tests
+      - name: Tests (example unit tests, perf tests ignored)
+        timeout-minutes: 10
+        run: cargo test --locked --examples
       - name: Example run
+        timeout-minutes: 5
         run: cargo run --example combat
